@@ -1,24 +1,27 @@
 """
-DeepSeek-R1-Distill-Qwen-32B on Modal — served via vLLM with an OpenAI-compatible API.
+DeepSeek-R1-Distill-Qwen-1.5B on Modal — served via vLLM with an OpenAI-compatible API.
 
 Usage:
   # one-time: download weights into a Modal Volume
-  modal run serve.py::download_model
+  modal run server.py::download_model
 
   # deploy the inference server (ephemeral, stops on Ctrl-C)
-  modal serve serve.py
+  modal serve server.py
 
   # deploy persistently
-  modal deploy serve.py
+  modal deploy server.py
 """
 
 import modal
 
-APP_NAME = "deepseek-r1-32b"
-MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+APP_NAME = "deepseek-r1-1p5b"
+MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 MODEL_DIR = "/model"
-VOLUME_NAME = "deepseek-r1-32b-weights"
+VOLUME_NAME = "deepseek-r1-1p5b-weights"
 VLLM_PORT = 8000
+INSTANCE_COUNT = 10
+TARGET_TOTAL_CONCURRENCY = 100
+MAX_INPUTS_PER_INSTANCE = (TARGET_TOTAL_CONCURRENCY + INSTANCE_COUNT - 1) // INSTANCE_COUNT
 
 # ---------------------------------------------------------------------------
 # Container image — matches Modal's official vLLM example
@@ -42,7 +45,7 @@ app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 # ---------------------------------------------------------------------------
-# Step 1: download weights  (run once:  modal run serve.py::download_model)
+# Step 1: download weights  (run once:  modal run server.py::download_model)
 # ---------------------------------------------------------------------------
 @app.function(
     image=image,
@@ -63,12 +66,14 @@ def download_model():
 # ---------------------------------------------------------------------------
 @app.cls(
     image=image,
-    gpu="A100-80GB:2",
+    gpu="A100-80GB:1",
     volumes={MODEL_DIR: volume},
     timeout=3600,
     scaledown_window=300,
+    min_containers=INSTANCE_COUNT,
+    max_containers=INSTANCE_COUNT,
 )
-@modal.concurrent(max_inputs=4)
+@modal.concurrent(max_inputs=MAX_INPUTS_PER_INSTANCE)
 class DeepSeekServer:
     @modal.enter()
     def start_server(self):
@@ -77,11 +82,11 @@ class DeepSeekServer:
         cmd = [
             "vllm", "serve", MODEL_DIR,
             "--served-model-name", "deepseek-r1",
-            "--tensor-parallel-size", "2",
+            "--tensor-parallel-size", "1",
             "--host", "0.0.0.0",
             "--port", str(VLLM_PORT),
-            "--max-model-len", "32768",
-            "--gpu-memory-utilization", "0.92",
+            "--max-model-len", "8192",
+            "--gpu-memory-utilization", "0.85",
             "--enforce-eager",
             "--trust-remote-code",
         ]
@@ -108,7 +113,7 @@ class DeepSeekServer:
 
 
 # ---------------------------------------------------------------------------
-# Quick smoke-test  (modal run serve.py)
+# Quick smoke-test  (modal run server.py)
 # ---------------------------------------------------------------------------
 @app.local_entrypoint()
 def main():
