@@ -4,6 +4,7 @@ import addIcon from "../assets/icons/add.svg";
 import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
 import dropdownIcon from "../assets/icons/dropdown.svg";
+import plannerSystemPromptRaw from "../../planner-system-prompt.txt?raw";
 
 const TITLE_TEXT = "Welcome to the Matrix.";
 const SCRAMBLE_CHARS =
@@ -28,8 +29,12 @@ const HOLD_BETWEEN_PROMPTS_MS = 360;
 const CHIP_REMOVE_ANIMATION_MS = 520;
 const CHIP_REPOSITION_ANIMATION_MS = 620;
 const CHAT_ENTER_TRANSITION_MS = 620;
+const CHAT_INITIAL_MESSAGE_STAGGER_MS = 500;
 const COMPOSER_DOCK_ANIMATION_MS = 680;
 const THINKING_PLACEHOLDER_TEXT = "Thinking...";
+const DEFAULT_PLANNER_SYSTEM_PROMPT =
+  "You are a simulation planner assistant. Use provided prompt + context files to draft planning assumptions and key demographic factors.";
+const PLANNER_SYSTEM_PROMPT = (plannerSystemPromptRaw || "").trim() || DEFAULT_PLANNER_SYSTEM_PROMPT;
 const CHAT_AUTO_SCROLL_THRESHOLD_PX = 40;
 const DEFAULT_PLANNER_MODEL_ENDPOINT =
   "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server.modal.run";
@@ -433,6 +438,147 @@ function splitAssistantThinkContent(rawText, assumeUnclosedIsThinking = false) {
     thinkText: "",
     answerText: withoutOpenTags.replace(/<\/think\s*>/gi, "")
   };
+}
+
+function stripThinkSections(text) {
+  const normalized = String(text || "").replace(/\r\n/g, "\n");
+  const closeTagRegex = /<\/think\s*>/gi;
+  let lastCloseEnd = -1;
+  let closeMatch = closeTagRegex.exec(normalized);
+  while (closeMatch) {
+    lastCloseEnd = closeTagRegex.lastIndex;
+    closeMatch = closeTagRegex.exec(normalized);
+  }
+
+  const postThinkSection = lastCloseEnd !== -1 ? normalized.slice(lastCloseEnd) : normalized;
+  const fullyClosedRemoved = postThinkSection.replace(/<think\s*>[\s\S]*?<\/think\s*>/gi, "");
+  const trailingOpenThinkRemoved = fullyClosedRemoved.replace(/<think\s*>[\s\S]*$/gi, "");
+  return trailingOpenThinkRemoved.replace(/<\/?think\s*>/gi, "").trim();
+}
+
+function looksLikeCsvLine(line) {
+  const normalized = String(line || "").trim();
+  return normalized.length > 0 && normalized.includes(",") && !normalized.startsWith("```");
+}
+
+function parseCsvLine(line) {
+  const text = String(line || "");
+  const fields = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (char === "\"") {
+      if (inQuotes && text[i + 1] === "\"") {
+        current += "\"";
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      fields.push(current);
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  fields.push(current);
+  return fields;
+}
+
+function extractCsvPayload(text) {
+  const withoutThinking = stripThinkSections(text);
+  if (!withoutThinking) return "";
+
+  const fencedMatch = withoutThinking.match(/```(?:csv)?\s*\n([\s\S]*?)```/i);
+  const candidate = fencedMatch ? fencedMatch[1].trim() : withoutThinking.trim();
+  if (!candidate) return "";
+
+  const lines = candidate.replace(/\r\n/g, "\n").split("\n");
+  let startIndex = -1;
+  let headerFields = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!looksLikeCsvLine(line)) continue;
+
+    const fields = parseCsvLine(line).map((field) => field.trim().toLowerCase());
+    const hasAgentId = fields.includes("agent_id");
+    const hasSystemPrompt = fields.includes("system_prompt");
+    const hasConnections = fields.includes("connections");
+
+    if ((hasAgentId && hasSystemPrompt) || (hasAgentId && hasConnections) || /^run_id\s*,\s*agent_id\b/i.test(line.trim())) {
+      startIndex = i;
+      headerFields = parseCsvLine(line);
+      break;
+    }
+  }
+
+  if (startIndex === -1) return "";
+  if (headerFields.length < 2) return "";
+
+  const expectedFieldCount = headerFields.length;
+  const csvLines = [lines[startIndex].trim()];
+
+  for (let i = startIndex + 1; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line) break;
+    if (!looksLikeCsvLine(line)) break;
+
+    const rowFields = parseCsvLine(line);
+    if (rowFields.length !== expectedFieldCount) break;
+    csvLines.push(line);
+  }
+
+  if (csvLines.length < 2) return "";
+  return csvLines.join("\n").trim();
+}
+
+function extractRunIdFromCsv(csvText) {
+  const lines = String(csvText || "").split("\n");
+  if (lines.length < 2) return "";
+  if (!/run_id/i.test(lines[0])) return "";
+  const firstRow = lines[1].trim();
+  if (!firstRow) return "";
+
+  if (firstRow.startsWith("\"")) {
+    const closingQuoteIndex = firstRow.indexOf("\"", 1);
+    if (closingQuoteIndex > 1) {
+      return firstRow.slice(1, closingQuoteIndex).trim();
+    }
+  }
+  const firstCommaIndex = firstRow.indexOf(",");
+  if (firstCommaIndex === -1) return "";
+  return firstRow.slice(0, firstCommaIndex).trim();
+}
+
+function downloadCsvArtifact(csvText) {
+  const normalized = String(csvText || "").trim();
+  if (!normalized) return;
+
+  const runId = extractRunIdFromCsv(normalized);
+  const safeRunId = runId.replace(/[^a-zA-Z0-9_-]+/g, "_");
+  const fallbackStamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const filename = safeRunId ? `${safeRunId}.csv` : `planner-output-${fallbackStamp}.csv`;
+
+  const blob = new Blob([normalized], { type: "text/csv;charset=utf-8;" });
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 0);
 }
 
 function thoughtDurationLabel(durationSeconds) {
@@ -1111,13 +1257,17 @@ function App() {
     setIsSubmitting(true);
 
     try {
-      if (!isChatMode) {
+      const isFirstChatSubmit = !isChatMode;
+      if (isFirstChatSubmit) {
         if (composerShellRef.current) {
           composerStartRectRef.current = composerShellRef.current.getBoundingClientRect();
         }
         setIsChatMode(true);
         await new Promise((resolve) => {
           window.setTimeout(resolve, CHAT_ENTER_TRANSITION_MS);
+        });
+        await new Promise((resolve) => {
+          window.setTimeout(resolve, CHAT_INITIAL_MESSAGE_STAGGER_MS);
         });
       }
 
@@ -1158,8 +1308,7 @@ function App() {
         messages: [
           {
             role: "system",
-            content:
-              "You are a simulation planner assistant. Use provided prompt + context files to draft planning assumptions and key demographic factors."
+            content: PLANNER_SYSTEM_PROMPT
           },
           {
             role: "user",
@@ -1216,6 +1365,11 @@ function App() {
 
       if (!plannerText) {
         throw new Error("Planner endpoint returned no completion content.");
+      }
+
+      const csvPayload = extractCsvPayload(plannerText);
+      if (csvPayload) {
+        downloadCsvArtifact(csvPayload);
       }
 
       const completionTimeMs = Date.now();

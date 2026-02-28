@@ -315,19 +315,7 @@ input {
   margin: 0;
   font-size: 0.95rem;
   font-weight: 500;
-  background-image: linear-gradient(
-    105deg,
-    rgba(255, 255, 255, 0.24) 0%,
-    rgba(255, 255, 255, 0.88) 46%,
-    rgba(255, 255, 255, 0.24) 88%
-  );
-  background-size: 220% 100%;
-  background-position: 220% 0;
-  background-repeat: no-repeat;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: thinking-glisten 1.6s linear infinite;
+  color: var(--muted-strong);
 }
 
 .chat-assistant-think-details {
@@ -906,15 +894,6 @@ input {
   100% {
     opacity: 1;
     transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes thinking-glisten {
-  from {
-    background-position: 220% 0;
-  }
-  to {
-    background-position: -20% 0;
   }
 }
 
