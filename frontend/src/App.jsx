@@ -1324,6 +1324,26 @@ async function buildPlannerContextBlock(files) {
 // ── Clarifying questions ────────────────────────────────────────────────────
 
 const CLARIFY_TIMEOUT_MS = 25000;
+const CLARIFY_MAX_QUESTIONS = 6;
+const FORCE_GENERATION_REPLY_PATTERN =
+  /\b(go\s*ahead|proceed|continue|as\s*is|use\s*defaults?|skip\s*(follow[- ]?ups?|questions?)|no\s*more\s*questions?|don'?t\s*ask\s*more|do\s*not\s*ask\s*more)\b/i;
+
+function isForceGenerationReply(text) {
+  return FORCE_GENERATION_REPLY_PATTERN.test(String(text || "").trim());
+}
+
+function extractClarifyingQuestionLines(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^\d+[\.\)]\s+\S/.test(line));
+}
+
+function limitClarifyingQuestions(lines, maxQuestions = CLARIFY_MAX_QUESTIONS) {
+  return lines
+    .slice(0, maxQuestions)
+    .map((line, index) => line.replace(/^\d+[\.\)]\s+/, `${index + 1}. `));
+}
 
 // ── Exa search ──────────────────────────────────────────────────────────────
 
@@ -1460,10 +1480,12 @@ function App() {
     shouldAutoScrollRef.current = distanceFromBottom <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
   };
 
-  const scrollChatToBottom = (behavior = "smooth") => {
+  const scrollChatToBottom = (behavior = "smooth", forceLock = false) => {
     const chatNode = chatScrollRef.current;
     if (!chatNode) return;
-    shouldAutoScrollRef.current = true;
+    if (forceLock) {
+      shouldAutoScrollRef.current = true;
+    }
     chatNode.scrollTo({
       top: chatNode.scrollHeight,
       behavior
@@ -1534,7 +1556,10 @@ function App() {
 
   useEffect(() => {
     if (!isChatActive || !isHeroCompacted || !shouldAutoScrollRef.current) return;
-    const scrollToBottom = () => scrollChatToBottom("smooth");
+    const scrollToBottom = () => {
+      if (!shouldAutoScrollRef.current) return;
+      scrollChatToBottom("auto");
+    };
     let delayedRafId = 0;
     const rafId = window.requestAnimationFrame(scrollToBottom);
     const timeoutId = window.setTimeout(() => {
@@ -1553,7 +1578,7 @@ function App() {
     if (!isChatActive || !isHeroCompacted) return;
     shouldAutoScrollRef.current = true;
     const rafId = window.requestAnimationFrame(() => {
-      scrollChatToBottom("auto");
+      scrollChatToBottom("auto", true);
     });
     return () => {
       window.cancelAnimationFrame(rafId);
@@ -2195,13 +2220,13 @@ function App() {
     );
 
     if (shouldAutoScrollRef.current) {
-      window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
+      window.requestAnimationFrame(() => scrollChatToBottom("auto"));
     }
 
     return assistantText;
   };
 
-  const runMainQuery = async (enrichedPrompt, filesForSubmit, assistantPendingTurnId, generalExaData = null) => {
+  const runMainQuery = async (enrichedPrompt, filesForSubmit, assistantPendingTurnId) => {
     const plannerContext = await buildPlannerContextBlock(filesForSubmit);
     const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
     const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
@@ -2267,7 +2292,7 @@ function App() {
     }, 220);
 
     if (shouldAutoScrollRef.current) {
-      window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
+      window.requestAnimationFrame(() => scrollChatToBottom("auto"));
     }
   };
 
@@ -2278,8 +2303,12 @@ function App() {
     // If we're waiting for clarification answers, treat this as the user's reply
     if (clarifyState) {
       if (!promptText) return;
-      const { originalPrompt, filesForSubmit, generalExaData } = clarifyState;
-      const enrichedPrompt = `${originalPrompt}\n\nUser's clarifications: ${promptText}`;
+      const { originalPrompt, filesForSubmit, followUpQuestionCount = 0 } = clarifyState;
+      const shouldForceGenerateNow =
+        followUpQuestionCount >= CLARIFY_MAX_QUESTIONS || isForceGenerationReply(promptText);
+      const enrichedPrompt = shouldForceGenerateNow
+        ? `${originalPrompt}\n\nUser instruction: Proceed now with reasonable assumptions and generate the data. Do not ask additional follow-up questions.`
+        : `${originalPrompt}\n\nUser's clarifications: ${promptText}`;
       const requestedSampleCount = extractRequestedSampleCountFromPrompt(enrichedPrompt);
 
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
@@ -2300,10 +2329,10 @@ function App() {
           requestedSampleCount
         }
       ]);
-      window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
+      window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
 
       try {
-        await runMainQuery(enrichedPrompt, filesForSubmit, assistantPendingTurnId, generalExaData);
+        await runMainQuery(enrichedPrompt, filesForSubmit, assistantPendingTurnId);
       } catch (error) {
         const failureTimeMs = Date.now();
         setChatMessages((prev) =>
@@ -2350,7 +2379,7 @@ function App() {
         { id: clarifyMsgId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, exaStatus: "searching" }
       ]);
       setScenarioText("");
-      window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
+      window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
 
       const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
       const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
@@ -2387,7 +2416,7 @@ function App() {
           {
             role: "system",
             content:
-              "You are a simulation planner assistant. Decide whether clarifying questions are necessary before generating high-quality representative samples.\n\nRules:\n- Ask follow-up questions ONLY if the request is underspecified for accurate representative generation.\n- If clarification is NOT needed, output exactly: NO_FOLLOWUPS\n- If clarification IS needed, output ONLY a numbered list of questions (no prose), with as many questions as needed (1 or more).\n- Keep questions concrete and directly tied to improving representative quality, segmentation, and constraints.\n- Do not include explanations, preambles, or summaries."
+              "You are a simulation planner assistant. Decide whether clarifying questions are necessary before generating high-quality representative samples.\n\nRules:\n- Ask follow-up questions ONLY if the request is underspecified for accurate representative generation.\n- Ask no more than 6 follow-up questions.\n- If the user explicitly asks to proceed without more questions (for example: go ahead, continue, as is, use defaults), output exactly: NO_FOLLOWUPS\n- If clarification is NOT needed, output exactly: NO_FOLLOWUPS\n- If clarification IS needed, output ONLY a numbered list of questions (no prose), with between 1 and 6 questions.\n- Keep questions concrete and directly tied to improving representative quality, segmentation, and constraints.\n- Do not include explanations, preambles, or summaries."
           },
           {
             role: "user",
@@ -2422,7 +2451,7 @@ function App() {
           }
         ]);
         try {
-          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId, generalExaData);
+          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId);
         } catch (error) {
           const failureTimeMs = Date.now();
           setChatMessages((prev) =>
@@ -2436,10 +2465,7 @@ function App() {
         return;
       }
 
-      const questionLines = cleanedClarifyText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => /^\d+[\.\)]\s+\S/.test(line));
+      const questionLines = extractClarifyingQuestionLines(cleanedClarifyText);
 
       if (questionLines.length === 0) {
         // Timed out or failed — go straight to main response
@@ -2456,7 +2482,7 @@ function App() {
           }
         ]);
         try {
-          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId, generalExaData);
+          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId);
         } catch (error) {
           const failureTimeMs = Date.now();
           setChatMessages((prev) =>
@@ -2470,9 +2496,23 @@ function App() {
         return;
       }
 
+      const limitedQuestionLines = limitClarifyingQuestions(questionLines);
+      const limitedQuestionText = limitedQuestionLines.join("\n");
+      setChatMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === clarifyMsgId
+            ? { ...msg, content: limitedQuestionText, pending: false }
+            : msg
+        )
+      );
+
       // Clarifying response is already streamed and finalized; now wait for user follow-up.
-      setClarifyState({ originalPrompt: promptText, filesForSubmit, generalExaData });
-      window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
+      setClarifyState({
+        originalPrompt: promptText,
+        filesForSubmit,
+        followUpQuestionCount: limitedQuestionLines.length
+      });
+      window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
 
     } catch (error) {
       console.error("Composer submit error:", error);
