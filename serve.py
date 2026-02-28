@@ -1,43 +1,39 @@
 """
-GLM-5 on Modal — served via vLLM with an OpenAI-compatible API.
+DeepSeek-R1-Distill-Qwen-32B on Modal — served via vLLM with an OpenAI-compatible API.
 
 Usage:
   # one-time: download weights into a Modal Volume
   modal run serve.py::download_model
 
-  # deploy the inference server
-  modal deploy serve.py
-
-  # or run ephemerally (stays up until you Ctrl-C)
+  # deploy the inference server (ephemeral, stops on Ctrl-C)
   modal serve serve.py
+
+  # deploy persistently
+  modal deploy serve.py
 """
 
 import modal
 
-APP_NAME = "glm-5"
-MODEL_ID = "zai-org/GLM-5"
+APP_NAME = "deepseek-r1-32b"
+MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 MODEL_DIR = "/model"
-VOLUME_NAME = "glm-5-weights"
+VOLUME_NAME = "deepseek-r1-32b-weights"
+VLLM_PORT = 8000
 
 # ---------------------------------------------------------------------------
-# Container image
+# Container image — matches Modal's official vLLM example
 # ---------------------------------------------------------------------------
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12"
+    )
+    .entrypoint([])
     .pip_install(
-        "vllm>=0.8.0",
+        "vllm==0.8.5",
+        "huggingface-hub==0.30.2",
         "hf-transfer>=0.1.8",
-        "huggingface_hub[hf_transfer]>=0.24.0",
-        "fastapi>=0.115.0",
-        "uvicorn>=0.30.0",
     )
-    .env(
-        {
-            "HF_HUB_ENABLE_HF_TRANSFER": "1",
-            # suppress tokenizer parallelism warnings inside vLLM workers
-            "TOKENIZERS_PARALLELISM": "false",
-        }
-    )
+    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
 )
 
 app = modal.App(APP_NAME)
@@ -51,88 +47,78 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 @app.function(
     image=image,
     volumes={MODEL_DIR: volume},
-    timeout=7200,           # 2 h — the full model is ~600 GB
+    timeout=7200,
     cpu=8,
-    memory=32768,           # 32 GB RAM for the download worker
+    memory=32768,
 )
-def download_model(hf_token: str = ""):
-    """Download Kimi K2.5 weights from HuggingFace into the Modal Volume."""
+def download_model():
     from huggingface_hub import snapshot_download
-    import os
-
-    kwargs = dict(local_dir=MODEL_DIR, ignore_patterns=["*.pt", "original/*"])
-    if hf_token:
-        kwargs["token"] = hf_token
-    elif os.environ.get("HF_TOKEN"):
-        kwargs["token"] = os.environ["HF_TOKEN"]
-
-    print(f"Downloading {MODEL_ID} → {MODEL_DIR} …")
-    snapshot_download(MODEL_ID, **kwargs)
+    snapshot_download(MODEL_ID, local_dir=MODEL_DIR)
     volume.commit()
-    print("Done. Weights committed to volume.")
+    print("Done.")
 
 
 # ---------------------------------------------------------------------------
-# Step 2: serve  (modal deploy serve.py  OR  modal serve serve.py)
+# Step 2: serve
 # ---------------------------------------------------------------------------
 @app.cls(
     image=image,
-    gpu="A100-80GB:8",      # 8× A100 80 GB — GLM-5 needs ~640 GB VRAM
+    gpu="A100-80GB:2",
     volumes={MODEL_DIR: volume},
-    timeout=3600,           # 1 h per request timeout
-    allow_concurrent_inputs=4,
-    scaledown_window=300,   # keep warm for 5 min after last request
+    timeout=3600,
+    scaledown_window=300,
 )
-class GLMServer:
+@modal.concurrent(max_inputs=4)
+class DeepSeekServer:
     @modal.enter()
-    def load(self):
-        from vllm import LLM
-
-        print("Loading GLM-5 …")
-        self.llm = LLM(
-            model=MODEL_DIR,
-            tensor_parallel_size=8,
-            trust_remote_code=True,
-            max_model_len=32768,        # trim context for memory — raise if needed
-            gpu_memory_utilization=0.92,
-            enforce_eager=False,
-        )
-        print("Model loaded.")
-
-    @modal.method()
-    def generate(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.6) -> str:
-        from vllm import SamplingParams
-
-        params = SamplingParams(temperature=temperature, max_tokens=max_tokens)
-        outputs = self.llm.generate([prompt], params)
-        return outputs[0].outputs[0].text
-
-    # OpenAI-compatible  /v1/chat/completions  endpoint
-    @modal.web_server(port=8000, startup_timeout=600)
-    def openai_server(self):
-        import subprocess, sys
+    def start_server(self):
+        import subprocess, time, socket
 
         cmd = [
-            sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-            "--model", MODEL_DIR,
-            "--tensor-parallel-size", "8",
-            "--trust-remote-code",
+            "vllm", "serve", MODEL_DIR,
+            "--served-model-name", "deepseek-r1",
+            "--tensor-parallel-size", "2",
+            "--host", "0.0.0.0",
+            "--port", str(VLLM_PORT),
             "--max-model-len", "32768",
             "--gpu-memory-utilization", "0.92",
-            "--host", "0.0.0.0",
-            "--port", "8000",
+            "--enforce-eager",
+            "--trust-remote-code",
         ]
-        subprocess.Popen(cmd)
+        self._proc = subprocess.Popen(cmd)
+
+        # wait for server to be ready (model loading can take ~5 min)
+        for _ in range(600):
+            try:
+                s = socket.create_connection(("127.0.0.1", VLLM_PORT), timeout=1)
+                s.close()
+                print("vLLM server is ready.")
+                return
+            except OSError:
+                time.sleep(1)
+        raise RuntimeError("vLLM server did not start in time.")
+
+    @modal.exit()
+    def stop_server(self):
+        self._proc.terminate()
+
+    @modal.web_server(port=VLLM_PORT, startup_timeout=600)
+    def openai_server(self):
+        pass  # server is already running from start_server()
 
 
 # ---------------------------------------------------------------------------
-# Quick smoke-test (modal run serve.py)
+# Quick smoke-test  (modal run serve.py)
 # ---------------------------------------------------------------------------
 @app.local_entrypoint()
 def main():
-    server = GLMServer()
-    reply = server.generate.remote(
-        "Hello! Briefly describe what you can do.",
-        max_tokens=256,
-    )
-    print(reply)
+    import urllib.request, json
+    url = "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server-dev.modal.run/v1/chat/completions"
+    body = json.dumps({
+        "model": "deepseek-r1",
+        "messages": [{"role": "user", "content": "Hello! What can you do?"}],
+        "max_tokens": 200,
+    }).encode()
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as resp:
+        print(json.loads(resp.read())["choices"][0]["message"]["content"])
