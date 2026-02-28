@@ -1,5 +1,5 @@
 """
-DeepSeek-R1-Distill-Qwen-1.5B on Modal — served via vLLM with an OpenAI-compatible API.
+DeepSeek-R1-Distill-Qwen-14B on Modal — served via vLLM with an OpenAI-compatible API.
 
 Usage:
   # one-time: download weights into a Modal Volume
@@ -14,14 +14,12 @@ Usage:
 
 import modal
 
-APP_NAME = "deepseek-r1-1p5b"
-MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+APP_NAME = "deepseek-r1-14b"
+MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
 MODEL_DIR = "/model"
-VOLUME_NAME = "deepseek-r1-1p5b-weights"
+VOLUME_NAME = "deepseek-r1-14b-weights"
 VLLM_PORT = 8000
-INSTANCE_COUNT = 10
-TARGET_TOTAL_CONCURRENCY = 100
-MAX_INPUTS_PER_INSTANCE = (TARGET_TOTAL_CONCURRENCY + INSTANCE_COUNT - 1) // INSTANCE_COUNT
+INSTANCE_COUNT = 1
 
 # ---------------------------------------------------------------------------
 # Container image — matches Modal's official vLLM example
@@ -73,20 +71,21 @@ def download_model():
     min_containers=INSTANCE_COUNT,
     max_containers=INSTANCE_COUNT,
 )
-@modal.concurrent(max_inputs=MAX_INPUTS_PER_INSTANCE)
+@modal.concurrent(max_inputs=1)
 class DeepSeekServer:
     @modal.enter()
     def start_server(self):
         import subprocess, time, socket
 
         cmd = [
-            "vllm", "serve", MODEL_DIR,
+            "vllm", "serve", MODEL_ID,
+            "--download-dir", MODEL_DIR,
             "--served-model-name", "deepseek-r1",
             "--tensor-parallel-size", "1",
             "--host", "0.0.0.0",
             "--port", str(VLLM_PORT),
-            "--max-model-len", "8192",
-            "--gpu-memory-utilization", "0.85",
+            "--max-model-len", "16384",
+            "--gpu-memory-utilization", "0.9",
             "--enforce-eager",
             "--trust-remote-code",
         ]
