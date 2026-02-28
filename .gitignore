@@ -1,4 +1,43 @@
 .env
 __pycache__/
+<<<<<<< HEAD
 *.pyc
 .DS_Store
+=======
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+backend/.venv/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+frontend/.vite/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build / temp artifacts
+tmp/
+temp/
+*.tmp
+*.pid
+
+# Local runtime outputs
+artifacts/
+reports/
+
+# Accidental root npm lockfile (frontend lockfile is still tracked)
+/package-lock.json
+
+.venv
+>>>>>>> 0908124f12612787dd111fb215c33fa11dd354c0
