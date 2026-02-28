@@ -52,3 +52,5 @@ reports/
 
 # Accidental root npm lockfile (frontend lockfile is still tracked)
 /package-lock.json
+
+.venv
