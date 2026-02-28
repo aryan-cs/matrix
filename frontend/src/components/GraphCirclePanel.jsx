@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 function clampNodeRadius(count) {
-  if (count <= 12) return 16;
-  if (count <= 28) return 13;
-  if (count <= 70) return 10.5;
-  if (count <= 140) return 8.5;
-  return 7;
+  if (count <= 12) return 18;
+  if (count <= 28) return 14.5;
+  if (count <= 70) return 11.75;
+  if (count <= 140) return 9.5;
+  return 8;
 }
 
 function deriveNodeNumberText(id, fallbackIndex) {
@@ -264,6 +264,12 @@ function GraphCirclePanel({ graph = null }) {
         });
     };
 
+    const shouldPreserveOnResize = (nextWidth, nextHeight) => {
+      if (engine.nodes.length !== graphData.nodes.length) return false;
+      const isShrinking = nextWidth < engine.width || nextHeight < engine.height;
+      return !isShrinking;
+    };
+
     const setupFromGraph = ({ preservePositions }) => {
       const width = Math.max(1, stageNode.clientWidth);
       const height = Math.max(1, stageNode.clientHeight);
@@ -316,6 +322,18 @@ function GraphCirclePanel({ graph = null }) {
       rebuildEdges();
     };
 
+    const syncLayoutToStage = () => {
+      const width = Math.max(1, stageNode.clientWidth);
+      const height = Math.max(1, stageNode.clientHeight);
+      const nextDpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+      const viewportChanged =
+        width !== engine.width ||
+        height !== engine.height ||
+        nextDpr !== engine.dpr;
+      if (!viewportChanged) return;
+      setupFromGraph({ preservePositions: shouldPreserveOnResize(width, height) });
+    };
+
     const pointerPositionFor = (event) => {
       const bounds = canvasNode.getBoundingClientRect();
       return {
@@ -332,7 +350,7 @@ function GraphCirclePanel({ graph = null }) {
         const dx = x - node.x;
         const dy = y - node.y;
         const distanceSq = dx * dx + dy * dy;
-        const maxGrab = (node.radius + 8) * (node.radius + 8);
+        const maxGrab = (node.radius + 14) * (node.radius + 14);
         if (distanceSq > maxGrab || distanceSq >= bestDistanceSq) continue;
         bestDistanceSq = distanceSq;
         bestIndex = i;
@@ -362,6 +380,9 @@ function GraphCirclePanel({ graph = null }) {
       }
       engine.activeNodeIndex = closestIndex;
       const activeNode = engine.nodes[closestIndex];
+      if (activeNode?.id) {
+        setSelectedNodeId(activeNode.id);
+      }
       activeNode.x = pointer.x;
       activeNode.y = pointer.y;
       activeNode.vx = 0;
@@ -405,6 +426,16 @@ function GraphCirclePanel({ graph = null }) {
         if (node?.id) {
           setSelectedNodeId(node.id);
         }
+      }
+    };
+
+    const onCanvasClick = (event) => {
+      const pointer = pointerPositionFor(event);
+      const closestIndex = findClosestNodeIndex(pointer.x, pointer.y);
+      if (closestIndex === -1) return;
+      const node = engine.nodes[closestIndex];
+      if (node?.id) {
+        setSelectedNodeId(node.id);
       }
     };
 
@@ -546,6 +577,7 @@ function GraphCirclePanel({ graph = null }) {
     };
 
     const animate = () => {
+      syncLayoutToStage();
       step();
       draw();
       engine.rafId = window.requestAnimationFrame(animate);
@@ -556,7 +588,7 @@ function GraphCirclePanel({ graph = null }) {
       if (resizeRafId) return;
       resizeRafId = window.requestAnimationFrame(() => {
         resizeRafId = 0;
-        setupFromGraph({ preservePositions: true });
+        syncLayoutToStage();
       });
     });
     resizeObserver.observe(stageNode);
@@ -566,6 +598,7 @@ function GraphCirclePanel({ graph = null }) {
     canvasNode.addEventListener("pointerup", releaseActiveNode);
     canvasNode.addEventListener("pointercancel", releaseActiveNode);
     canvasNode.addEventListener("pointerleave", releaseActiveNode);
+    canvasNode.addEventListener("click", onCanvasClick);
 
     animate();
 
@@ -576,6 +609,7 @@ function GraphCirclePanel({ graph = null }) {
       canvasNode.removeEventListener("pointerup", releaseActiveNode);
       canvasNode.removeEventListener("pointercancel", releaseActiveNode);
       canvasNode.removeEventListener("pointerleave", releaseActiveNode);
+      canvasNode.removeEventListener("click", onCanvasClick);
       window.cancelAnimationFrame(engine.rafId);
       if (resizeRafId) {
         window.cancelAnimationFrame(resizeRafId);
