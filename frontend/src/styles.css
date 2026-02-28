@@ -149,7 +149,7 @@ input {
 .chat-thread.visible {
   max-height: 100%;
   opacity: 1;
-  padding: 0 8px 10px;
+  padding: 0 8px 220px;
   pointer-events: auto;
 }
 
@@ -169,6 +169,9 @@ input {
 
 .chat-message {
   max-width: 100%;
+  opacity: 0;
+  transform: translateY(12px) scale(0.985);
+  animation: message-enter 560ms var(--ease-slingshot) forwards;
 }
 
 .chat-message.user {
@@ -191,15 +194,6 @@ input {
   border: none;
   line-height: 1.45;
   font-size: 0.98rem;
-}
-
-.chat-message-text + .chat-message-text {
-  margin-top: 8px;
-}
-
-.chat-thinking-text {
-  color: var(--muted);
-  font-style: italic;
 }
 
 .chat-message.thinking .chat-message-text {
@@ -240,12 +234,139 @@ input {
   width: min(800px, calc(100vw - 80px));
   display: grid;
   gap: 10px;
-  transition: transform var(--motion-slow) var(--ease-spring);
+  position: fixed;
+  left: 50%;
+  bottom: 50%;
+  z-index: 14;
+  transform: translate(-50%, 50%);
+  transition:
+    bottom var(--motion-slow) var(--ease-slingshot),
+    transform var(--motion-slow) var(--ease-slingshot),
+    opacity var(--motion-medium) var(--ease-soft);
 }
 
 .composer-shell.docked {
-  transform: translateY(0);
-  margin-bottom: clamp(8px, 1.4vh, 14px);
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  margin: 0;
+}
+
+.composer-shell.docked .context-note {
+  display: none;
+}
+
+.thinking-panel {
+  display: grid;
+  gap: 6px;
+}
+
+.thinking-toggle {
+  border: none;
+  background: transparent;
+  color: var(--muted-strong);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  justify-self: start;
+  font-size: 0.9rem;
+}
+
+.thinking-caret {
+  display: inline-block;
+  transition: transform var(--motion-medium) var(--ease-soft);
+}
+
+.thinking-caret.expanded {
+  transform: rotate(90deg);
+}
+
+.thinking-content {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition:
+    max-height var(--motion-slow) var(--ease-spring),
+    opacity var(--motion-medium) var(--ease-soft);
+}
+
+.thinking-content.expanded {
+  max-height: 420px;
+  opacity: 1;
+  overflow: auto;
+}
+
+.chat-thinking-text {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body pre,
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 0 0 10px;
+}
+
+.markdown-body p:last-child,
+.markdown-body ul:last-child,
+.markdown-body ol:last-child,
+.markdown-body pre:last-child,
+.markdown-body h1:last-child,
+.markdown-body h2:last-child,
+.markdown-body h3:last-child,
+.markdown-body h4:last-child,
+.markdown-body h5:last-child,
+.markdown-body h6:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.4rem;
+}
+
+.markdown-body li + li {
+  margin-top: 2px;
+}
+
+.markdown-body code {
+  font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.93em;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 0.1em 0.35em;
+}
+
+.markdown-body pre {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 10px;
+  overflow-x: auto;
+}
+
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-body hr {
+  border: none;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.16);
+  margin: 14px 0;
+}
+
+.markdown-body a {
+  color: #d5e8ff;
+  text-decoration: underline;
 }
 
 .composer-frame {
@@ -678,6 +799,21 @@ input {
   100% {
     transform: translateY(0);
     opacity: 1;
+  }
+}
+
+@keyframes message-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
+  }
+  65% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 

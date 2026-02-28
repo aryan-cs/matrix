@@ -27,6 +27,7 @@ const NOTICE_DURATION_MS = 2000;
 const NOTICE_FADE_MS = 450;
 const CHIP_REMOVE_ANIMATION_MS = 520;
 const CHIP_REPOSITION_ANIMATION_MS = 620;
+const FIRST_CHAT_REVEAL_DELAY_MS = 620;
 const TEXT_PREVIEW_EXTENSIONS = new Set([
   "txt",
   "md",
@@ -249,6 +250,12 @@ function plannerTextFromBody(body) {
   const choiceContent = body?.choices?.[0]?.message?.content;
   if (typeof choiceContent === "string") return choiceContent;
   return "";
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function escapeHtml(text) {
@@ -972,9 +979,18 @@ function App() {
 
     const assistantMessageId = createLocalMessageId("assistant");
     const userMessageText = promptText || `Attached ${filesForSubmit.length} context file(s).`;
+    const firstEntry = !chatStarted;
 
     setChatStarted(true);
     setAutoScrollEnabled(true);
+    setScenarioText("");
+    setIsSubmitting(true);
+    setSubmitNotice({ kind: "idle", message: "" });
+
+    if (firstEntry) {
+      await delay(FIRST_CHAT_REVEAL_DELAY_MS);
+    }
+
     setThinkingPanelExpanded(assistantMessageId, true);
     setMessages((prev) => [
       ...prev,
@@ -993,10 +1009,6 @@ function App() {
         error: false
       }
     ]);
-
-    setScenarioText("");
-    setIsSubmitting(true);
-    setSubmitNotice({ kind: "idle", message: "" });
 
     const formData = new FormData();
     formData.append(
@@ -1121,8 +1133,15 @@ function App() {
                 (() => {
                   const isAssistant = message.role === "assistant";
                   const { thinkingText, finalText } = isAssistant
-                    ? splitThinkContent(message.content)
+                    ? splitThinkContent(message.content, message.thinking)
                     : { thinkingText: "", finalText: message.content };
+                  const hasThinkingTrace = Boolean(thinkingText.trim());
+                  const finalBodyText = finalText.trim();
+                  const isThinkingExpanded =
+                    hasThinkingTrace && (expandedThinkingIds.has(message.id) || message.thinking);
+                  const thinkingHtml = hasThinkingTrace ? markdownToHtml(thinkingText.trim()) : "";
+                  const finalHtml = finalBodyText ? markdownToHtml(finalBodyText) : "";
+                  const plainHtml = !isAssistant ? markdownToHtml(message.content) : "";
 
                   return (
                     <article
@@ -1131,15 +1150,57 @@ function App() {
                         message.error ? "error" : ""
                       }`}
                     >
-                      {isAssistant && thinkingText ? (
-                        <pre className="chat-message-text chat-thinking-text">{thinkingText}</pre>
+                      {isAssistant && hasThinkingTrace ? (
+                        <div className="thinking-panel">
+                          <button
+                            type="button"
+                            className="thinking-toggle"
+                            aria-expanded={isThinkingExpanded}
+                            onClick={() =>
+                              setThinkingPanelExpanded(message.id, !isThinkingExpanded)
+                            }
+                          >
+                            <span
+                              className={`thinking-caret ${
+                                isThinkingExpanded ? "expanded" : ""
+                              }`}
+                              aria-hidden="true"
+                            >
+                              ▸
+                            </span>
+                            <span className="thinking-toggle-label">
+                              {message.thinking ? "Thinking..." : "Thought process"}
+                            </span>
+                          </button>
+                          <div
+                            className={`thinking-content ${
+                              isThinkingExpanded ? "expanded" : "collapsed"
+                            }`}
+                          >
+                            <div
+                              className="chat-message-text markdown-body chat-thinking-text"
+                              dangerouslySetInnerHTML={{ __html: thinkingHtml }}
+                            />
+                          </div>
+                        </div>
                       ) : null}
-                      {isAssistant && finalText ? (
-                        <pre className="chat-message-text">{finalText}</pre>
+                      {isAssistant && finalBodyText ? (
+                        <div
+                          className="chat-message-text markdown-body"
+                          dangerouslySetInnerHTML={{ __html: finalHtml }}
+                        />
                       ) : null}
-                      {!isAssistant ? <pre className="chat-message-text">{message.content}</pre> : null}
-                      {isAssistant && !thinkingText && !finalText ? (
-                        <pre className="chat-message-text">{message.content}</pre>
+                      {!isAssistant ? (
+                        <div
+                          className="chat-message-text markdown-body"
+                          dangerouslySetInnerHTML={{ __html: plainHtml }}
+                        />
+                      ) : null}
+                      {isAssistant && !hasThinkingTrace && !finalBodyText ? (
+                        <div
+                          className="chat-message-text markdown-body"
+                          dangerouslySetInnerHTML={{ __html: markdownToHtml(message.content) }}
+                        />
                       ) : null}
                     </article>
                   );
