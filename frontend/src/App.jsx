@@ -999,6 +999,34 @@ function ThinkDisclosure({ id, label, children }) {
   );
 }
 
+function domainFromUrl(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; }
+}
+
+function ExaStatusPill({ status }) {
+  if (!status) return null;
+  const isSearching = status === "searching";
+  const results = typeof status === "object" ? status.results : null;
+  if (!isSearching && !results?.length) return null;
+  return (
+    <div className="exa-fetched-wrap">
+      {isSearching && (
+        <div className="exa-fetched-searching">
+          <span className="exa-fetched-label">exa</span>
+          <span className="exa-pill-dots"><span /><span /><span /></span>
+        </div>
+      )}
+      {results && results.map((r, i) => (
+        <a key={i} className="exa-fetched-row" href={r.url} target="_blank" rel="noreferrer"
+           style={{ animationDelay: `${i * 70}ms` }}>
+          <span className="exa-fetched-text">Fetched: {r.title || domainFromUrl(r.url)}</span>
+          <span className="exa-fetched-arrow">›</span>
+        </a>
+      ))}
+    </div>
+  );
+}
+
 function renderMessageContent(message, options = {}) {
   const { onOpenArtifact, onQueueArtifactDownload, isArtifactDownloadQueued } = options;
 
@@ -1015,9 +1043,7 @@ function renderMessageContent(message, options = {}) {
     return (
       <>
         <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
-        {message.exaWebSearchSuccess ? (
-          <p className="chat-exa-success-placeholder">{EXA_SUCCESS_PLACEHOLDER_TEXT}</p>
-        ) : null}
+        {message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null}
       </>
     );
   }
@@ -1069,7 +1095,12 @@ function renderMessageContent(message, options = {}) {
         />
       );
     }
-    return renderMarkdownContent(primaryAnswerText, message.id);
+    return (
+      <>
+        {message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null}
+        {renderMarkdownContent(primaryAnswerText, message.id)}
+      </>
+    );
   }
 
   return (
@@ -1079,6 +1110,7 @@ function renderMessageContent(message, options = {}) {
           {renderMarkdownContent(thinkText, `${message.id}-think`)}
         </ThinkDisclosure>
       </div>
+      {message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null}
       {hasAnswerText && showCsvArtifact ? (
         <div className="chat-assistant-answer">
           <CsvArtifactCard
@@ -1286,6 +1318,20 @@ function formatExaContext(exaData) {
     return `[${i + 1}] ${title}\n${highlight}`;
   });
   return `\n\n[Web research via Exa — ${exaData.results.length} sources]\n${snippets.join("\n\n")}`;
+}
+
+function buildCensusQuery(prompt) {
+  return `census demographics population statistics survey data ${prompt}`;
+}
+
+function formatCensusExaContext(exaData) {
+  if (!exaData?.results?.length) return "";
+  const snippets = exaData.results.map((r, i) => {
+    const title = r.title || r.url || `Source ${i + 1}`;
+    const highlight = r.highlights?.[0]?.text || r.highlights?.[0] || "";
+    return `[${i + 1}] ${title}\n${highlight}`;
+  });
+  return `\n\n[Census & demographic data via Exa — ${exaData.results.length} sources]\n${snippets.join("\n\n")}`;
 }
 
 function App() {
@@ -2098,24 +2144,30 @@ function App() {
     return assistantText;
   };
 
-  const runMainQuery = async (enrichedPrompt, filesForSubmit, assistantPendingTurnId) => {
+  const runMainQuery = async (enrichedPrompt, filesForSubmit, assistantPendingTurnId, generalExaData = null) => {
     const plannerContext = await buildPlannerContextBlock(filesForSubmit);
     const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
     const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
     if (!plannerRequestUrl) throw new Error("Planner endpoint is not configured.");
 
-    // Exa search runs before planner completion for retrieval context
-    const exaPromise = runExaSearch(enrichedPrompt);
-    const exaData = await exaPromise;
-    const exaSearchSucceeded = Boolean(exaData?.results?.length);
-    if (exaSearchSucceeded) {
-      setChatMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === assistantPendingTurnId ? { ...msg, exaWebSearchSuccess: true } : msg
-        )
-      );
-    }
-    const exaContext = formatExaContext(exaData);
+    // Census/demographic Exa search runs here, after user has answered clarifying questions
+    setChatMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === assistantPendingTurnId ? { ...msg, exaStatus: "searching" } : msg
+      )
+    );
+    const censusExaData = await runExaSearch(buildCensusQuery(enrichedPrompt));
+    setChatMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === assistantPendingTurnId
+          ? { ...msg, exaStatus: censusExaData?.results?.length ? { results: censusExaData.results } : null }
+          : msg
+      )
+    );
+    const exaContext = [
+      formatExaContext(generalExaData),
+      formatCensusExaContext(censusExaData)
+    ].filter(Boolean).join("\n\n");
 
     const payload = {
       model: PLANNER_MODEL_ID,
@@ -2169,7 +2221,7 @@ function App() {
     // If we're waiting for clarification answers, treat this as the user's reply
     if (clarifyState) {
       if (!promptText) return;
-      const { originalPrompt, filesForSubmit } = clarifyState;
+      const { originalPrompt, filesForSubmit, generalExaData } = clarifyState;
       const enrichedPrompt = `${originalPrompt}\n\nUser's clarifications: ${promptText}`;
       const requestedSampleCount = extractRequestedSampleCountFromPrompt(enrichedPrompt);
 
@@ -2194,7 +2246,7 @@ function App() {
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
 
       try {
-        await runMainQuery(enrichedPrompt, filesForSubmit, assistantPendingTurnId);
+        await runMainQuery(enrichedPrompt, filesForSubmit, assistantPendingTurnId, generalExaData);
       } catch (error) {
         const failureTimeMs = Date.now();
         setChatMessages((prev) =>
@@ -2238,7 +2290,7 @@ function App() {
       setChatMessages((prev) => [
         ...prev,
         userTurn,
-        { id: clarifyMsgId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true }
+        { id: clarifyMsgId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, exaStatus: "searching" }
       ]);
       setScenarioText("");
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
@@ -2248,6 +2300,17 @@ function App() {
       if (!plannerRequestUrl) {
         throw new Error("Planner endpoint is not configured.");
       }
+
+      // Exa general search runs before clarifying questions so the LLM has web context
+      const generalExaData = await runExaSearch(promptText);
+      const generalExaContext = formatExaContext(generalExaData);
+      setChatMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === clarifyMsgId
+            ? { ...msg, exaStatus: generalExaData?.results?.length ? { results: generalExaData.results } : null }
+            : msg
+        )
+      );
 
       const clarifyPayload = {
         model: PLANNER_MODEL_ID,
@@ -2265,6 +2328,7 @@ function App() {
             content:
               `Simulation request: "${promptText}"\n\n` +
               `Attached context files: ${filesForSubmit.length}\n\n` +
+              (generalExaContext ? `Background research:${generalExaContext}\n\n` : "") +
               "Determine whether follow-up questions are needed."
           }
         ]
@@ -2292,7 +2356,7 @@ function App() {
           }
         ]);
         try {
-          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId);
+          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId, generalExaData);
         } catch (error) {
           const failureTimeMs = Date.now();
           setChatMessages((prev) =>
@@ -2326,7 +2390,7 @@ function App() {
           }
         ]);
         try {
-          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId);
+          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId, generalExaData);
         } catch (error) {
           const failureTimeMs = Date.now();
           setChatMessages((prev) =>
@@ -2341,7 +2405,7 @@ function App() {
       }
 
       // Clarifying response is already streamed and finalized; now wait for user follow-up.
-      setClarifyState({ originalPrompt: promptText, filesForSubmit });
+      setClarifyState({ originalPrompt: promptText, filesForSubmit, generalExaData });
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
 
     } catch (error) {
