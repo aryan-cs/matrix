@@ -448,12 +448,14 @@ function GraphCirclePanel({ graph = null }) {
         const labelVisibility = clamp((engine.width - 240) / 180, 0, 1);
         if (labelVisibility > 0.02) {
           const labelScale = 0.72 + labelVisibility * 0.28;
-          const labelFontSize = Math.max(
+          const nameFontSize = Math.max(
             8,
             Math.min(13, Math.floor((visualRadius * 0.52 + 5) * labelScale))
           );
+          const idFontSize = Math.max(8, Math.floor(nameFontSize * 0.86));
           const labelOffset = 4 + labelVisibility * 4;
-          const labelY = node.y - visualRadius - (1 + (1 - labelVisibility) * 1.5);
+          const nameY = node.y - visualRadius - (1 + (1 - labelVisibility) * 1.5);
+          const idY = nameY + Math.max(10, Math.floor(nameFontSize * 1.08));
           const maxLabelWidth = Math.min(engine.width * 0.4, 180);
           const rawRightX = node.x + visualRadius + labelOffset;
           let labelX = rawRightX;
@@ -463,11 +465,15 @@ function GraphCirclePanel({ graph = null }) {
             labelX = node.x - visualRadius - labelOffset;
           }
 
-          context.font = `500 ${labelFontSize}px "Google Sans", sans-serif`;
+          context.font = `500 ${nameFontSize}px "Google Sans", sans-serif`;
           context.textAlign = labelAlign;
           context.textBaseline = "alphabetic";
           context.fillStyle = `rgba(255, 255, 255, ${(0.42 + node.depth * 0.3) * labelVisibility})`;
-          context.fillText(node.label || node.id, labelX, labelY);
+          context.fillText(node.label || node.id, labelX, nameY);
+
+          context.font = `500 ${idFontSize}px "Google Sans Code", "Google Sans", ui-monospace, monospace`;
+          context.fillStyle = `rgba(190, 190, 190, ${(0.4 + node.depth * 0.28) * labelVisibility})`;
+          context.fillText(node.id, labelX, idY);
         }
       }
     };
