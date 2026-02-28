@@ -41,7 +41,7 @@ const STREAM_REVEAL_MIN_CHARS = 2;
 const STREAM_REVEAL_MAX_CHARS = 20;
 const STREAM_REVEAL_RATIO = 0.24;
 const GRAPH_PANEL_MIN_WIDTH = 280;
-const GRAPH_PANEL_MAX_WIDTH = 760;
+const GRAPH_PANEL_MAX_WIDTH = 1600;
 const GRAPH_PANEL_MIN_MAIN_WIDTH = 460;
 const GRAPH_PANEL_DEFAULT_WIDTH = (() => {
   const viewportWidth =
@@ -54,7 +54,7 @@ const GRAPH_PANEL_DEFAULT_WIDTH = (() => {
   );
   if (maxWidth <= 0) return 0;
   const minWidth = Math.min(GRAPH_PANEL_MIN_WIDTH, maxWidth);
-  const targetWidth = Math.round(viewportWidth * 0.4);
+  const targetWidth = Math.round(viewportWidth * 0.5);
   return Math.min(maxWidth, Math.max(minWidth, targetWidth));
 })();
 const DEFAULT_PLANNER_SYSTEM_PROMPT =
@@ -1049,10 +1049,14 @@ function renderMessageContent(message, options = {}) {
 
   const messageText = String(message.content || "");
   if (message.uiType === "status-tooltip") {
-    return <p className="chat-status-tooltip">{messageText}</p>;
+    return (
+      <div className="chat-meta-log">
+        <p className="chat-status-tooltip">{messageText}</p>
+      </div>
+    );
   }
 
-  const exaStatusBlock =
+  const exaStatusBody =
     message.exaWebSearchSuccess || message.exaWebSearchError ? (
       <>
         {message.exaWebSearchSuccess ? (
@@ -1066,14 +1070,22 @@ function renderMessageContent(message, options = {}) {
         ) : null}
       </>
     ) : null;
-  const exaFetchedStatusBlock = message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null;
+  const exaFetchedStatusBody = message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null;
+  const exaMetaBlock =
+    exaFetchedStatusBody || exaStatusBody ? (
+      <div className="chat-meta-exa">
+        {exaFetchedStatusBody}
+        {exaStatusBody}
+      </div>
+    ) : null;
 
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
     return (
       <>
-        {exaFetchedStatusBlock}
-        {exaStatusBlock}
-        <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
+        {exaMetaBlock}
+        <div className="chat-meta-think">
+          <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
+        </div>
       </>
     );
   }
@@ -1096,13 +1108,25 @@ function renderMessageContent(message, options = {}) {
     Number.isFinite(message.requestedSampleCount) && message.requestedSampleCount > 0
       ? message.requestedSampleCount
       : null;
+  const shouldHoldPendingThinkingStyle =
+    Boolean(message.pending) && (hasThinkText || messageText.trim() === THINKING_PLACEHOLDER_TEXT) && !hasAnswerText;
+
+  if (shouldHoldPendingThinkingStyle) {
+    return (
+      <>
+        {exaMetaBlock}
+        <div className="chat-meta-think">
+          <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
+        </div>
+      </>
+    );
+  }
 
   if (!hasThinkText) {
     if (showCsvArtifact) {
       return (
         <>
-          {exaFetchedStatusBlock}
-          {exaStatusBlock}
+          {exaMetaBlock}
           <CsvArtifactCard
             summary={csvSummary}
             pending={isCsvPending}
@@ -1131,8 +1155,7 @@ function renderMessageContent(message, options = {}) {
     }
     return (
       <>
-        {exaFetchedStatusBlock}
-        {exaStatusBlock}
+        {exaMetaBlock}
         {renderMarkdownContent(primaryAnswerText, message.id)}
       </>
     );
@@ -1140,9 +1163,8 @@ function renderMessageContent(message, options = {}) {
 
   return (
     <>
-      {exaFetchedStatusBlock}
-      {exaStatusBlock}
-      <div className="chat-assistant-think-wrap">
+      {exaMetaBlock}
+      <div className="chat-meta-think chat-assistant-think-wrap">
         <ThinkDisclosure id={message.id} label={thinkLabel}>
           {renderMarkdownContent(thinkText, `${message.id}-think`)}
         </ThinkDisclosure>
@@ -1196,6 +1218,20 @@ function messageShouldRenderCsvArtifact(message) {
   const { answerText } = splitAssistantThinkContent(messageText, treatUnclosedAsThinking);
   const primaryAnswerText = answerText.trim() ? answerText : messageText;
   return Boolean(summarizeCsvArtifact(primaryAnswerText)) || isLikelyCsvDraft(primaryAnswerText);
+}
+
+function messageHasThinkSection(message) {
+  if (!message || message.role !== "assistant") return false;
+  if (message.uiType === "status-tooltip") return false;
+
+  const messageText = String(message.content || "");
+  if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
+    return false;
+  }
+
+  const treatUnclosedAsThinking = Boolean(message.pending) || /<think\s*>/i.test(messageText);
+  const { thinkText } = splitAssistantThinkContent(messageText, treatUnclosedAsThinking);
+  return thinkText.trim().length > 0;
 }
 
 function consumeSseDataEvents(buffer, onData) {
@@ -2498,10 +2534,19 @@ function App() {
 
       const limitedQuestionLines = limitClarifyingQuestions(questionLines);
       const limitedQuestionText = limitedQuestionLines.join("\n");
+      const preserveThinkParsing = /<think\s*>/i.test(clarifyText);
+      const { thinkText: clarifyThinkText } = splitAssistantThinkContent(
+        clarifyText,
+        preserveThinkParsing
+      );
+      const normalizedClarifyThinkText = clarifyThinkText.trim();
+      const finalizedClarifyContent = normalizedClarifyThinkText
+        ? `<think>\n${normalizedClarifyThinkText}\n</think>\n\n${limitedQuestionText}`
+        : limitedQuestionText;
       setChatMessages((prev) =>
         prev.map((msg) =>
           msg.id === clarifyMsgId
-            ? { ...msg, content: limitedQuestionText, pending: false }
+            ? { ...msg, content: finalizedClarifyContent, pending: false }
             : msg
         )
       );
@@ -2579,6 +2624,7 @@ function App() {
                 const isArtifactMessage = messageShouldRenderCsvArtifact(message);
                 const isStatusTooltipMessage =
                   message.role === "assistant" && message.uiType === "status-tooltip";
+                const hasThinkSection = messageHasThinkSection(message);
                 return (
                   <article
                     className={`chat-row ${message.role} ${isArtifactMessage ? "artifact" : ""} ${
@@ -2589,7 +2635,7 @@ function App() {
                     <div
                       className={`chat-bubble ${message.role} ${message.pending ? "pending" : ""} ${message.error ? "error" : ""} ${isArtifactMessage ? "artifact" : ""} ${
                         isStatusTooltipMessage ? "status-tooltip" : ""
-                      }`}
+                      } ${hasThinkSection ? "has-think" : ""}`}
                     >
                       <div className="chat-content">
                         {renderMessageContent(message, {
