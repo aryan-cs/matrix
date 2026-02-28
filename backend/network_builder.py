@@ -1,0 +1,553 @@
+from __future__ import annotations
+
+import csv
+import io
+import json
+import os
+import re
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+
+REQUIRED_COLUMNS = {"agent_id", "connections", "system_prompt"}
+CONNECTION_SPLIT_PATTERN = re.compile(r"[|;,]")
+TEXT_MIME_PREFIX = "text/"
+TEXT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".xml",
+    ".html",
+    ".htm",
+    ".log",
+}
+DEFAULT_PLANNER_ENDPOINT = (
+    "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server.modal.run/v1/chat/completions"
+)
+DEFAULT_PLANNER_MODEL_ID = "deepseek-r1"
+PLANNER_CONTEXT_MAX_TOTAL_CHARS = 26000
+PLANNER_CONTEXT_MAX_FILE_CHARS = 5000
+
+
+class GraphBuildRequest(BaseModel):
+    csv_text: str = Field(..., min_length=1)
+    directed: bool = False
+
+
+class GraphNode(BaseModel):
+    id: str
+    metadata: dict[str, str]
+    connections: list[str]
+    declared_connections: list[str]
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+
+
+class GraphStats(BaseModel):
+    node_count: int
+    edge_count: int
+    isolated_node_count: int
+    unresolved_connection_count: int
+    connected_component_count: int
+
+
+class GraphBuildResponse(BaseModel):
+    directed: bool
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+    stats: GraphStats
+    warnings: list[str]
+
+
+class PlannerContextResponse(BaseModel):
+    output_text: str
+    model: str
+
+
+app = FastAPI(
+    title="Matrix Backend API",
+    version="0.1.0",
+    description="CSV-to-social-graph construction APIs for representative agent simulations.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _load_planner_system_prompt() -> str:
+    default_prompt = (
+        "You are a simulation planner assistant. "
+        "Use provided prompt + context files to generate representative-agent master CSV output."
+    )
+    prompt_path = Path(__file__).resolve().parent.parent / "planner-system-prompt.txt"
+    try:
+        raw = prompt_path.read_text(encoding="utf-8").strip()
+        return raw or default_prompt
+    except OSError:
+        return default_prompt
+
+
+def _planner_endpoint() -> str:
+    return os.getenv("PLANNER_MODEL_ENDPOINT", DEFAULT_PLANNER_ENDPOINT).strip()
+
+
+def _planner_model_id() -> str:
+    return os.getenv("PLANNER_MODEL_ID", DEFAULT_PLANNER_MODEL_ID).strip()
+
+
+def _planner_api_key() -> str:
+    return os.getenv("PLANNER_API_KEY", "").strip()
+
+
+def _planner_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    api_key = _planner_api_key()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _planner_payload(prompt: str, context_block: str, *, stream: bool) -> dict[str, Any]:
+    model_id = _planner_model_id()
+    return {
+        "model": model_id,
+        "temperature": 0.2,
+        "stream": stream,
+        "messages": [
+            {"role": "system", "content": _load_planner_system_prompt()},
+            {
+                "role": "user",
+                "content": f"Simulation request:\n{prompt}\n\nAttached context:\n{context_block}",
+            },
+        ],
+    }
+
+
+def _normalize_record(record: dict[str, Any], fieldnames: list[str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for field in fieldnames:
+        raw_value = record.get(field, "")
+        normalized[field] = str(raw_value).strip() if raw_value is not None else ""
+    return normalized
+
+
+def _parse_connections(raw_connections: str) -> list[str]:
+    raw = (raw_connections or "").strip()
+    if not raw:
+        return []
+
+    seen: set[str] = set()
+    parsed: list[str] = []
+    for item in CONNECTION_SPLIT_PATTERN.split(raw):
+        candidate = item.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        parsed.append(candidate)
+    return parsed
+
+
+def _is_text_context_file(file: UploadFile) -> bool:
+    content_type = (file.content_type or "").lower()
+    if content_type.startswith(TEXT_MIME_PREFIX):
+        return True
+    suffix = Path(file.filename or "").suffix.lower()
+    return suffix in TEXT_EXTENSIONS
+
+
+async def _build_context_block(files: list[UploadFile]) -> str:
+    if not files:
+        return "No external context files attached."
+
+    remaining_chars = PLANNER_CONTEXT_MAX_TOTAL_CHARS
+    sections: list[str] = []
+    for upload in files:
+        descriptor = f"{upload.filename or 'unknown-file'} ({upload.content_type or 'application/octet-stream'})"
+        if not _is_text_context_file(upload):
+            sections.append(
+                f"File: {descriptor}\nContent: [Binary or non-text file attached; not inlined.]"
+            )
+            continue
+
+        if remaining_chars <= 0:
+            sections.append(f"File: {descriptor}\nContent: [Omitted due to context size budget.]")
+            continue
+
+        raw = await upload.read()
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded = raw.decode("utf-8", errors="ignore")
+
+        excerpt_limit = min(PLANNER_CONTEXT_MAX_FILE_CHARS, remaining_chars)
+        excerpt = decoded[:excerpt_limit]
+        remaining_chars -= len(excerpt)
+        suffix = "\n...[truncated]" if len(decoded) > len(excerpt) else ""
+        sections.append(f"File: {descriptor}\nContent:\n```\n{excerpt}{suffix}\n```")
+
+    return "\n\n".join(sections)
+
+
+def _call_planner_model(prompt: str, context_block: str) -> tuple[str, str]:
+    planner_endpoint = _planner_endpoint()
+    if not planner_endpoint:
+        raise ValueError("Planner endpoint is not configured.")
+
+    model_id = _planner_model_id()
+    payload = _planner_payload(prompt, context_block, stream=False)
+
+    request = urllib.request.Request(
+        planner_endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_planner_headers(),
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise ValueError(f"Planner endpoint responded {exc.code}: {detail[:220]}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"Planner endpoint request failed: {exc.reason}") from exc
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Planner response was not valid JSON.") from exc
+
+    content = parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Planner returned empty content.")
+    return content, model_id
+
+
+def _planner_stream_events(prompt: str, context_block: str):
+    planner_endpoint = _planner_endpoint()
+    if not planner_endpoint:
+        raise ValueError("Planner endpoint is not configured.")
+
+    payload = _planner_payload(prompt, context_block, stream=True)
+    request = urllib.request.Request(
+        planner_endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_planner_headers(),
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=240) as response:
+        buffered_content = ""
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line:
+                continue
+
+            if not line.startswith("data:"):
+                # Some providers may emit plain JSON even with stream=true.
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                chunk = parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if isinstance(chunk, str) and chunk:
+                    buffered_content += chunk
+                    yield f"data: {json.dumps({'delta': chunk})}\n\n"
+                continue
+
+            data = line[len("data:") :].strip()
+            if not data:
+                continue
+            if data == "[DONE]":
+                yield "data: [DONE]\n\n"
+                return
+
+            try:
+                parsed = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+
+            if parsed.get("error"):
+                yield f"data: {json.dumps({'error': parsed['error']})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            delta = (
+                parsed.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                or parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
+                or ""
+            )
+            if not isinstance(delta, str) or not delta:
+                continue
+
+            buffered_content += delta
+            yield f"data: {json.dumps({'delta': delta})}\n\n"
+
+        if buffered_content:
+            yield "data: [DONE]\n\n"
+
+
+def _parse_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
+    with io.StringIO(csv_text) as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = [name.strip() for name in (reader.fieldnames or []) if name and name.strip()]
+        if not fieldnames:
+            raise ValueError("CSV is missing a header row.")
+
+        missing_columns = [name for name in REQUIRED_COLUMNS if name not in fieldnames]
+        if missing_columns:
+            raise ValueError(
+                f"CSV is missing required column(s): {', '.join(sorted(missing_columns))}."
+            )
+
+        rows: list[dict[str, str]] = []
+        for line_index, record in enumerate(reader, start=2):
+            normalized = _normalize_record(record, fieldnames)
+            if not any(value for value in normalized.values()):
+                continue
+
+            agent_id = normalized.get("agent_id", "")
+            if not agent_id:
+                raise ValueError(f"Row {line_index} is missing agent_id.")
+            rows.append(normalized)
+
+    if not rows:
+        raise ValueError("CSV has no data rows.")
+
+    return fieldnames, rows
+
+
+def build_social_graph(csv_text: str, directed: bool = False) -> GraphBuildResponse:
+    _fieldnames, rows = _parse_csv_rows(csv_text)
+
+    rows_by_agent_id: dict[str, dict[str, str]] = {}
+    ordered_agent_ids: list[str] = []
+    duplicate_ids: list[str] = []
+    warnings: list[str] = []
+
+    for row in rows:
+        agent_id = row["agent_id"]
+        if agent_id in rows_by_agent_id:
+            duplicate_ids.append(agent_id)
+            continue
+        rows_by_agent_id[agent_id] = row
+        ordered_agent_ids.append(agent_id)
+
+    if duplicate_ids:
+        duplicates_display = ", ".join(sorted(set(duplicate_ids)))
+        raise ValueError(f"Duplicate agent_id values detected: {duplicates_display}.")
+
+    adjacency: dict[str, set[str]] = {agent_id: set() for agent_id in ordered_agent_ids}
+    declared_connections_map: dict[str, list[str]] = {}
+    edge_set: set[tuple[str, str]] = set()
+    unresolved_count = 0
+
+    for source_agent_id in ordered_agent_ids:
+        row = rows_by_agent_id[source_agent_id]
+        declared_connections = _parse_connections(row.get("connections", ""))
+        declared_connections_map[source_agent_id] = declared_connections
+
+        for target_agent_id in declared_connections:
+            if target_agent_id == source_agent_id:
+                warnings.append(f"Self-connection ignored for agent_id '{source_agent_id}'.")
+                continue
+
+            if target_agent_id not in rows_by_agent_id:
+                unresolved_count += 1
+                warnings.append(
+                    "Unresolved connection ignored: "
+                    f"'{source_agent_id}' -> '{target_agent_id}'."
+                )
+                continue
+
+            if directed:
+                edge_key = (source_agent_id, target_agent_id)
+                if edge_key in edge_set:
+                    continue
+                edge_set.add(edge_key)
+                adjacency[source_agent_id].add(target_agent_id)
+            else:
+                left, right = sorted((source_agent_id, target_agent_id))
+                edge_key = (left, right)
+                if edge_key in edge_set:
+                    continue
+                edge_set.add(edge_key)
+                adjacency[source_agent_id].add(target_agent_id)
+                adjacency[target_agent_id].add(source_agent_id)
+
+    edge_list: list[GraphEdge] = [
+        GraphEdge(source=source, target=target) for source, target in sorted(edge_set)
+    ]
+
+    undirected_view: dict[str, set[str]] = {agent_id: set() for agent_id in ordered_agent_ids}
+    for source, target in edge_set:
+        undirected_view[source].add(target)
+        undirected_view[target].add(source)
+
+    connected_components = 0
+    visited: set[str] = set()
+    for agent_id in ordered_agent_ids:
+        if agent_id in visited:
+            continue
+        connected_components += 1
+        stack = [agent_id]
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            stack.extend(neighbor for neighbor in undirected_view[current] if neighbor not in visited)
+
+    if connected_components > 1:
+        warnings.append(
+            f"Graph is disconnected: found {connected_components} connected components."
+        )
+
+    node_list: list[GraphNode] = []
+    isolated_count = 0
+    for agent_id in ordered_agent_ids:
+        connections = sorted(adjacency[agent_id])
+        if not connections:
+            isolated_count += 1
+        node_list.append(
+            GraphNode(
+                id=agent_id,
+                metadata=rows_by_agent_id[agent_id],
+                connections=connections,
+                declared_connections=declared_connections_map.get(agent_id, []),
+            )
+        )
+
+    stats = GraphStats(
+        node_count=len(node_list),
+        edge_count=len(edge_list),
+        isolated_node_count=isolated_count,
+        unresolved_connection_count=unresolved_count,
+        connected_component_count=connected_components,
+    )
+
+    return GraphBuildResponse(
+        directed=directed,
+        nodes=node_list,
+        edges=edge_list,
+        stats=stats,
+        warnings=warnings,
+    )
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/api/graph/from-csv-text", response_model=GraphBuildResponse)
+async def graph_from_csv_text(payload: GraphBuildRequest) -> GraphBuildResponse:
+    try:
+        return build_social_graph(payload.csv_text, directed=payload.directed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/graph/from-csv-file", response_model=GraphBuildResponse)
+async def graph_from_csv_file(
+    file: UploadFile = File(...),
+    directed: bool = False,
+) -> GraphBuildResponse:
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be a .csv file.")
+
+    try:
+        content = await file.read()
+        csv_text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CSV file must be UTF-8 encoded.") from exc
+
+    try:
+        return build_social_graph(csv_text, directed=directed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/planner/context", response_model=PlannerContextResponse)
+async def planner_context(
+    prompt: str = Form(...),
+    context_manifest: str = Form(default=""),
+    context_files: list[UploadFile] = File(default=[]),
+) -> PlannerContextResponse:
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is required.")
+
+    _ = context_manifest  # reserved for audit/debug use; included by frontend form payload
+
+    try:
+        context_block = await _build_context_block(context_files)
+        output_text, model_id = _call_planner_model(prompt.strip(), context_block)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive guard
+        raise HTTPException(
+            status_code=502,
+            detail=f"Planner pipeline failed unexpectedly: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    return PlannerContextResponse(output_text=output_text, model=model_id)
+
+
+@app.post("/api/planner/context/stream")
+async def planner_context_stream(
+    prompt: str = Form(...),
+    context_manifest: str = Form(default=""),
+    context_files: list[UploadFile] = File(default=[]),
+):
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is required.")
+
+    _ = context_manifest  # reserved for audit/debug use; included by frontend form payload
+    context_block = await _build_context_block(context_files)
+
+    def event_generator():
+        done_emitted = False
+        try:
+            for event in _planner_stream_events(prompt.strip(), context_block):
+                if event.strip() == "data: [DONE]":
+                    done_emitted = True
+                yield event
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            yield f"data: {json.dumps({'error': f'Planner endpoint responded {exc.code}: {detail[:220]}'})}\n\n"
+        except urllib.error.URLError as exc:
+            yield f"data: {json.dumps({'error': f'Planner endpoint request failed: {exc.reason}'})}\n\n"
+        except Exception as exc:  # pragma: no cover - defensive guard
+            yield f"data: {json.dumps({'error': f'Planner stream failed: {type(exc).__name__}: {exc}'})}\n\n"
+        finally:
+            if not done_emitted:
+                yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
