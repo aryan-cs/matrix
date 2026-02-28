@@ -1,0 +1,18 @@
+{
+    "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/.DS_Store": true,
+        "**/Thumbs.db": true,
+        "package-lock.json": true,
+        ".hidden-items.json": true,
+        "package.json": true,
+        ".vscode": true,
+        ".vscode/**": true,
+        ".venv": true,
+        ".venv/**": true,
+        ".venv.windows.bak": true,
+        ".venv.windows.bak/**": true
+    }
+}

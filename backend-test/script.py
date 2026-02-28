@@ -1,25 +1,24 @@
 """
-DeepSeek-R1-Distill-Qwen-14B on Modal — served via vLLM with an OpenAI-compatible API.
+DeepSeek-R1-Distill-Qwen-32B on Modal — served via vLLM with an OpenAI-compatible API.
 
 Usage:
   # one-time: download weights into a Modal Volume
-  modal run server.py::download_model
+  modal run serve.py::download_model
 
   # deploy the inference server (ephemeral, stops on Ctrl-C)
-  modal serve server.py
+  modal serve serve.py
 
   # deploy persistently
-  modal deploy server.py
+  modal deploy serve.py
 """
 
 import modal
 
-APP_NAME = "deepseek-r1-14b"
-MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+APP_NAME = "deepseek-r1-32b"
+MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 MODEL_DIR = "/model"
-VOLUME_NAME = "deepseek-r1-14b-weights"
+VOLUME_NAME = "deepseek-r1-32b-weights"
 VLLM_PORT = 8000
-INSTANCE_COUNT = 1
 
 # ---------------------------------------------------------------------------
 # Container image — matches Modal's official vLLM example
@@ -38,54 +37,46 @@ image = (
 )
 
 app = modal.App(APP_NAME)
-
-# Persistent volume — weights survive across runs so you only download once.
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 # ---------------------------------------------------------------------------
-# Step 1: download weights  (run once:  modal run server.py::download_model)
+# Step 1: download weights  (run once:  modal run serve.py::download_model)
 # ---------------------------------------------------------------------------
 @app.function(
     image=image,
     volumes={MODEL_DIR: volume},
-    timeout=7200,
+    timeout=60 * 60 * 2,
     cpu=8,
     memory=32768,
 )
-def download_model():
-    from huggingface_hub import snapshot_download
-    snapshot_download(MODEL_ID, local_dir=MODEL_DIR)
-    volume.commit()
-    print("Done.")
+def download_model() -> None:
+    """One-time pre-download of model weights into the Modal volume."""
+    _download_model_if_needed()
 
 
-# ---------------------------------------------------------------------------
-# Step 2: serve
-# ---------------------------------------------------------------------------
-@app.cls(
+@app.function(
     image=image,
-    gpu="A100-80GB:1",
+    gpu="A100-80GB:2",
     volumes={MODEL_DIR: volume},
-    timeout=3600,
+    timeout=60 * 60 * 24,
     scaledown_window=300,
     min_containers=INSTANCE_COUNT,
     max_containers=INSTANCE_COUNT,
 )
-@modal.concurrent(max_inputs=1)
+@modal.concurrent(max_inputs=4)
 class DeepSeekServer:
     @modal.enter()
     def start_server(self):
         import subprocess, time, socket
 
         cmd = [
-            "vllm", "serve", MODEL_ID,
-            "--download-dir", MODEL_DIR,
+            "vllm", "serve", MODEL_DIR,
             "--served-model-name", "deepseek-r1",
-            "--tensor-parallel-size", "1",
+            "--tensor-parallel-size", "2",
             "--host", "0.0.0.0",
             "--port", str(VLLM_PORT),
-            "--max-model-len", "16384",
-            "--gpu-memory-utilization", "0.9",
+            "--max-model-len", "32768",
+            "--gpu-memory-utilization", "0.92",
             "--enforce-eager",
             "--trust-remote-code",
         ]
@@ -112,7 +103,7 @@ class DeepSeekServer:
 
 
 # ---------------------------------------------------------------------------
-# Quick smoke-test  (modal run server.py)
+# Quick smoke-test  (modal run serve.py)
 # ---------------------------------------------------------------------------
 @app.local_entrypoint()
 def main():

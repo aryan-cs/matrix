@@ -1,23 +1,9 @@
-# macOS
-.DS_Store
-
-# Editor / IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Logs
-*.log
-logs/
-
-# Env files
 .env
-.env.*
-!.env.example
-
-# Python / backend
 __pycache__/
+<<<<<<< HEAD
+*.pyc
+.DS_Store
+=======
 *.py[cod]
 *.pyo
 *.pyd
@@ -54,3 +40,4 @@ reports/
 /package-lock.json
 
 .venv
+>>>>>>> 0908124f12612787dd111fb215c33fa11dd354c0
