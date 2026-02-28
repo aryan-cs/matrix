@@ -20,7 +20,7 @@
 
 ## Architecture
 1. Frontend: React + CSS app for prompt submission, planning review/edit, job monitoring, and report viewing/download.
-2. Backend API: Python FastAPI service coordinating planner, simulation, artifact generation, and run state machine.
+2. Backend API: Python FastAPI service (managed with `uv`) coordinating planner, simulation, artifact generation, and run state machine.
 3. Orchestration: Modal jobs for planner tasks and agent simulation workers.
 4. Memory: Supermemory namespaces per agent, scoped to run ID + agent ID.
 5. Retrieval: Exa primary provider; fallback to standard web search provider when Exa fails/timeouts.
@@ -118,11 +118,92 @@
 4. Phase 4: Aggregation pipeline, dual report generators, PDF compilation.
 5. Phase 5: Trace/audit pipeline, metrics dashboards, retention/deletion jobs, performance tuning to SLOs.
 
+## Project Management and Delivery Operations
+
+### Team Structure and Ownership
+- Product/Simulation Lead: owns scenario UX, report usefulness, and policy for uncertainty disclosures.
+- Backend Lead: owns API contracts, orchestration, data models, and run-state reliability.
+- Frontend Lead: owns React UI, async run monitoring UX, and report consumption UX.
+- ML/Agent Lead: owns planner prompts, persona synthesis quality, and agent behavior consistency.
+- Infrastructure Lead: owns Modal runtime, Supermemory integration, artifact storage, and observability.
+
+### Work Management Model
+- Roadmap unit: epics mapped directly to Delivery Phases 1-5.
+- Sprint cadence: 1-week sprints with a working demo at end of each sprint.
+- Tracking: each epic decomposed into API tasks, UI tasks, infra tasks, and test tasks.
+- Definition of done for each task: code merged, tests passing, trace logging added, docs updated.
+- Release gates between phases: acceptance scenarios for that phase must pass before starting next phase.
+
+### Branching, CI, and Release Flow
+- Branching model: `main` (protected), short-lived feature branches, PR-based merges only.
+- PR requirements: at least one reviewer, CI checks green, API contract changes documented in PLAN/README.
+- CI checks: backend unit tests, frontend build/test, lint checks, and smoke API integration tests.
+- Environments: `local` -> `staging` -> `pilot`.
+- Release tag format: `v0.x.y` with changelog entries grouped by Planner, Simulation, Reporting, Infra.
+
+## Developer Runbook (How the Project Is Run)
+
+### Monorepo Layout (Target)
+- `backend/`: FastAPI service, simulation orchestration, planner, report generation, retention jobs.
+- `frontend/`: React + CSS client for scenario input, planning review, and report viewing.
+- `infra/`: deployment manifests/scripts for Modal integration and storage wiring.
+- `docs/`: API notes, prompt templates, evaluation rubric, and incident runbooks.
+
+### Backend Environment Management (`uv`)
+- Python dependency management and command execution must use `uv`.
+- Backend bootstrap:
+  - `cd backend`
+  - `uv venv`
+  - `uv sync`
+- Run backend locally:
+  - `uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000`
+- Run backend tests:
+  - `uv run pytest`
+- Run background/maintenance tasks (examples):
+  - `uv run python scripts/retention_cleanup.py`
+  - `uv run python scripts/recompute_metrics.py --run-id <id>`
+
+### Frontend Development Run
+- `cd frontend`
+- `npm install`
+- `npm run dev -- --host 127.0.0.1 --port 5173`
+- Frontend build check:
+  - `npm run build`
+
+### Local End-to-End Run
+1. Start backend with `uv run uvicorn ...` on `:8000`.
+2. Start frontend Vite server on `:5173`.
+3. Submit simulation prompt in UI.
+4. Verify planner review/edit/approve cycle.
+5. Verify async run reaches terminal state and report artifacts download.
+6. Validate trace endpoint contains planner, retrieval, simulation, and reporting events.
+
+### Environment Variables (Minimum)
+- `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`
+- `SUPERMEMORY_API_KEY`
+- `EXA_API_KEY`
+- `FALLBACK_SEARCH_API_KEY`
+- `DATABASE_URL`
+- `ARTIFACT_STORAGE_BUCKET`
+- `DEFAULT_MODEL_ID`
+
+### Runtime Operations and On-Call Basics
+- Health checks: `/healthz` for API uptime and `/readyz` for dependency readiness.
+- Alerting triggers:
+  - Run success rate drops below `0.95`.
+  - P95 runtime exceeds 300 seconds.
+  - Trace completeness falls below `1.0`.
+- Incident first response:
+  - Identify impacted stage (planning/simulation/reporting).
+  - Pause new runs if failure is systemic.
+  - Recover queued jobs, then backfill failed artifact generation.
+  - Publish incident note with root cause and corrective action.
+
 ## Assumptions and Defaults
 - Default deployment is single-tenant prototype with no auth.
 - Reproducibility is moderate: configs/prompts/logs pinned, but live retrieval/model drift accepted.
 - Hard dependencies on Modal and Supermemory are intentional for v1.
-- Frontend stack is React + CSS; backend stack is Python.
+- Frontend stack is React + CSS; backend stack is Python managed via `uv`.
 - Retrieval is Exa-first with fallback web search.
 - Validation priority is automated metrics, not fixed benchmark suites or expert rubric reviews.
 - Reports include quotes + argument clusters, and produce raw `.tex` plus compiled PDF.
