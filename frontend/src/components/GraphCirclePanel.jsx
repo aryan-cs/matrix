@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 function clampNodeRadius(count) {
   if (count <= 12) return 18;
@@ -25,33 +25,14 @@ function normalizeGraphData(graph) {
     .map((node) => {
       const id = String(node?.id ?? "").trim();
       if (!id) return null;
-      const metadata =
-        node && typeof node.metadata === "object" && node.metadata !== null ? node.metadata : {};
-      const label = String(
-        node?.label ||
-          metadata?.full_name ||
-          metadata?.name ||
-          metadata?.fullName ||
-          id
-      );
-      const connections = Array.isArray(node?.connections)
-        ? node.connections
-            .map((connectionId) => String(connectionId || "").trim())
-            .filter(Boolean)
-        : [];
-
-      return {
-        id,
-        label,
-        metadata,
-        connections
-      };
+      return { id };
     })
     .filter(Boolean);
 
   if (nodes.length === 0) {
     return { nodes: [], edges: [] };
   }
+
   const indexById = new Map(nodes.map((node, index) => [node.id, index]));
   const edges = [];
   const edgeKeys = new Set();
@@ -96,98 +77,10 @@ function buildHomePositions(count, width, height, nodeRadius) {
   return { positions, centerX, centerY, ringRadius };
 }
 
-const DETAIL_FIELDS = [
-  ["segment_key", "Segment"],
-  ["age", "Age"],
-  ["gender", "Gender"],
-  ["ethnicity", "Ethnicity"],
-  ["socioeconomic_status", "Socioeconomic Status"],
-  ["household_income_usd", "Household Income"],
-  ["household_structure", "Household"],
-  ["education", "Education"],
-  ["occupation", "Occupation"],
-  ["political_lean", "Political Lean"],
-  ["home_address", "Location"]
-];
-
-function buildDetailRows(selectedNode, nodeById, adjacencyById) {
-  if (!selectedNode) return [];
-
-  const preferredConnections = Array.isArray(selectedNode.connections)
-    ? selectedNode.connections
-    : [];
-  const fallbackConnections = Array.from(adjacencyById.get(selectedNode.id) || []);
-  const rawConnectionIds =
-    preferredConnections.length > 0 ? preferredConnections : fallbackConnections;
-  const connectionIds = Array.from(
-    new Set(
-      rawConnectionIds
-        .map((id) => String(id || "").trim())
-        .filter((id) => id && id !== selectedNode.id)
-    )
-  );
-  const connectionNames =
-    connectionIds.length > 0
-      ? connectionIds.map((id) => nodeById.get(id)?.label || id)
-      : ["No direct connections listed."];
-
-  const rows = [
-    { label: "__name__", value: selectedNode.label || selectedNode.id },
-    { label: "Agent ID", value: selectedNode.id }
-  ];
-
-  const metadata = selectedNode.metadata && typeof selectedNode.metadata === "object"
-    ? selectedNode.metadata
-    : {};
-
-  for (const [key, label] of DETAIL_FIELDS) {
-    const value = String(metadata[key] ?? "").trim();
-    if (!value) continue;
-    rows.push({ label, value });
-  }
-
-  rows.push({ label: "Connected Nodes", value: connectionNames.join(", ") });
-  return rows;
-}
-
 function GraphCirclePanel({ graph = null }) {
-  const [selectedNodeId, setSelectedNodeId] = useState("");
-  const selectedNodeIdRef = useRef("");
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
-  const graphData = useMemo(
-    () => normalizeGraphData(graph),
-    [graph]
-  );
-  const nodeById = useMemo(
-    () => new Map(graphData.nodes.map((node) => [node.id, node])),
-    [graphData]
-  );
-  const adjacencyById = useMemo(() => {
-    const adjacency = new Map(graphData.nodes.map((node) => [node.id, new Set()]));
-    for (const edge of graphData.edges) {
-      const source = graphData.nodes[edge.sourceIndex];
-      const target = graphData.nodes[edge.targetIndex];
-      if (!source || !target || source.id === target.id) continue;
-      adjacency.get(source.id)?.add(target.id);
-      adjacency.get(target.id)?.add(source.id);
-    }
-    return adjacency;
-  }, [graphData]);
-  const detailTargetRows = useMemo(() => {
-    const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) : null;
-    return buildDetailRows(selectedNode, nodeById, adjacencyById);
-  }, [selectedNodeId, nodeById, adjacencyById]);
-
-  useEffect(() => {
-    selectedNodeIdRef.current = selectedNodeId;
-  }, [selectedNodeId]);
-
-  useEffect(() => {
-    if (selectedNodeId && !nodeById.has(selectedNodeId)) {
-      setSelectedNodeId("");
-    }
-  }, [selectedNodeId, nodeById]);
+  const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
 
   useEffect(() => {
     const stageNode = stageRef.current;
@@ -213,6 +106,7 @@ function GraphCirclePanel({ graph = null }) {
       didDragSincePointerDown: false,
       rafId: 0
     };
+
     let resizeRafId = 0;
 
     const setCanvasViewport = (width, height) => {
@@ -286,8 +180,7 @@ function GraphCirclePanel({ graph = null }) {
       engine.centerX = layout.centerX;
       engine.centerY = layout.centerY;
       engine.ringRadius = layout.ringRadius;
-      const shouldRebuildNodes =
-        !preservePositions || engine.nodes.length !== homes.length;
+      const shouldRebuildNodes = !preservePositions || engine.nodes.length !== homes.length;
 
       if (shouldRebuildNodes) {
         engine.nodes = homes.map((home, index) => ({
@@ -410,33 +303,12 @@ function GraphCirclePanel({ graph = null }) {
 
     const releaseActiveNode = (event) => {
       if (engine.activeNodeIndex === -1) return;
-      const releasedNodeIndex = engine.activeNodeIndex;
       if (canvasNode.hasPointerCapture(event.pointerId)) {
         canvasNode.releasePointerCapture(event.pointerId);
       }
       engine.activeNodeIndex = -1;
-      const wasClickSelection =
-        !engine.didDragSincePointerDown &&
-        engine.pointerDownNodeIndex === releasedNodeIndex &&
-        releasedNodeIndex >= 0;
       engine.pointerDownNodeIndex = -1;
       engine.didDragSincePointerDown = false;
-      if (wasClickSelection) {
-        const node = engine.nodes[releasedNodeIndex];
-        if (node?.id) {
-          setSelectedNodeId(node.id);
-        }
-      }
-    };
-
-    const onCanvasClick = (event) => {
-      const pointer = pointerPositionFor(event);
-      const closestIndex = findClosestNodeIndex(pointer.x, pointer.y);
-      if (closestIndex === -1) return;
-      const node = engine.nodes[closestIndex];
-      if (node?.id) {
-        setSelectedNodeId(node.id);
-      }
     };
 
     const step = () => {
@@ -598,7 +470,6 @@ function GraphCirclePanel({ graph = null }) {
     canvasNode.addEventListener("pointerup", releaseActiveNode);
     canvasNode.addEventListener("pointercancel", releaseActiveNode);
     canvasNode.addEventListener("pointerleave", releaseActiveNode);
-    canvasNode.addEventListener("click", onCanvasClick);
 
     animate();
 
@@ -609,7 +480,6 @@ function GraphCirclePanel({ graph = null }) {
       canvasNode.removeEventListener("pointerup", releaseActiveNode);
       canvasNode.removeEventListener("pointercancel", releaseActiveNode);
       canvasNode.removeEventListener("pointerleave", releaseActiveNode);
-      canvasNode.removeEventListener("click", onCanvasClick);
       window.cancelAnimationFrame(engine.rafId);
       if (resizeRafId) {
         window.cancelAnimationFrame(resizeRafId);
@@ -627,24 +497,6 @@ function GraphCirclePanel({ graph = null }) {
         ) : null}
         <canvas ref={canvasRef} className="graph-circle-canvas-element" />
       </div>
-      {selectedNodeId ? (
-        <div className="graph-node-inspector active">
-          <dl className="graph-node-inspector-grid">
-            {detailTargetRows.map((row, index) =>
-              row.label === "__name__" ? (
-                <div className="graph-node-inspector-row name" key={`name-${index}`}>
-                  <dd className="graph-node-inspector-name">{row.value}</dd>
-                </div>
-              ) : (
-                <div className="graph-node-inspector-row" key={`${row.label}-${index}`}>
-                  <dt className="graph-node-inspector-label">{row.label}</dt>
-                  <dd className="graph-node-inspector-value">{row.value}</dd>
-                </div>
-              )
-            )}
-          </dl>
-        </div>
-      ) : null}
     </div>
   );
 }

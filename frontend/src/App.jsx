@@ -34,15 +34,29 @@ const CHAT_ENTER_TRANSITION_MS = 620;
 const CHAT_INITIAL_MESSAGE_STAGGER_MS = 500;
 const COMPOSER_DOCK_ANIMATION_MS = 680;
 const ARTIFACT_MODAL_EXIT_MS = 220;
-const THINKING_PLACEHOLDER_TEXT = "Thinking...";
+const THINKING_PLACEHOLDER_TEXT = "Performing matrix multiplications...";
 const EXA_SUCCESS_PLACEHOLDER_TEXT = "Searched the web with Exa.";
+const EXA_FAILURE_PLACEHOLDER_TEXT = "Failed to search with Exa.";
 const STREAM_REVEAL_MIN_CHARS = 2;
 const STREAM_REVEAL_MAX_CHARS = 20;
 const STREAM_REVEAL_RATIO = 0.24;
-const GRAPH_PANEL_DEFAULT_WIDTH = 360;
 const GRAPH_PANEL_MIN_WIDTH = 280;
 const GRAPH_PANEL_MAX_WIDTH = 760;
 const GRAPH_PANEL_MIN_MAIN_WIDTH = 460;
+const GRAPH_PANEL_DEFAULT_WIDTH = (() => {
+  const viewportWidth =
+    typeof window !== "undefined"
+      ? window.innerWidth || 0
+      : GRAPH_PANEL_MAX_WIDTH + GRAPH_PANEL_MIN_MAIN_WIDTH;
+  const maxWidth = Math.max(
+    0,
+    Math.min(GRAPH_PANEL_MAX_WIDTH, viewportWidth - GRAPH_PANEL_MIN_MAIN_WIDTH)
+  );
+  if (maxWidth <= 0) return 0;
+  const minWidth = Math.min(GRAPH_PANEL_MIN_WIDTH, maxWidth);
+  const targetWidth = Math.round(viewportWidth * 0.4);
+  return Math.min(maxWidth, Math.max(minWidth, targetWidth));
+})();
 const DEFAULT_PLANNER_SYSTEM_PROMPT =
   "You are a simulation planner assistant. Use provided prompt + context files to draft planning assumptions and key demographic factors.";
 const PLANNER_SYSTEM_PROMPT = (plannerSystemPromptRaw || "").trim() || DEFAULT_PLANNER_SYSTEM_PROMPT;
@@ -1039,11 +1053,23 @@ function renderMessageContent(message, options = {}) {
     return <p className="chat-status-tooltip">{messageText}</p>;
   }
 
+  const exaStatusBlock =
+    message.pending && (message.exaWebSearchSuccess || message.exaWebSearchError) ? (
+      <>
+        {message.exaWebSearchSuccess ? (
+          <p className="chat-exa-success-placeholder">{EXA_SUCCESS_PLACEHOLDER_TEXT}</p>
+        ) : null}
+        {message.exaWebSearchError ? (
+          <p className="chat-exa-failure-placeholder">{EXA_FAILURE_PLACEHOLDER_TEXT}</p>
+        ) : null}
+      </>
+    ) : null;
+
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
     return (
       <>
+        {exaStatusBlock}
         <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
-        {message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null}
       </>
     );
   }
@@ -1070,34 +1096,37 @@ function renderMessageContent(message, options = {}) {
   if (!hasThinkText) {
     if (showCsvArtifact) {
       return (
-        <CsvArtifactCard
-          summary={csvSummary}
-          pending={isCsvPending}
-          totalCount={requestedSampleCount}
-          previewText={artifactPreviewText}
-          onOpen={
-            onOpenArtifact
-              ? () => onOpenArtifact({ messageId: message.id, content: artifactPreviewText })
-              : null
-          }
-          onDownload={
-            onQueueArtifactDownload
-              ? () =>
-                  onQueueArtifactDownload({
-                    messageId: message.id,
-                    content: artifactPreviewText,
-                    runId: csvSummary?.runId || "",
-                    pending: isCsvPending
-                  })
-              : null
-          }
-          downloadQueued={downloadQueued}
-        />
+        <>
+          {exaStatusBlock}
+          <CsvArtifactCard
+            summary={csvSummary}
+            pending={isCsvPending}
+            totalCount={requestedSampleCount}
+            previewText={artifactPreviewText}
+            onOpen={
+              onOpenArtifact
+                ? () => onOpenArtifact({ messageId: message.id, content: artifactPreviewText })
+                : null
+            }
+            onDownload={
+              onQueueArtifactDownload
+                ? () =>
+                    onQueueArtifactDownload({
+                      messageId: message.id,
+                      content: artifactPreviewText,
+                      runId: csvSummary?.runId || "",
+                      pending: isCsvPending
+                    })
+                : null
+            }
+            downloadQueued={downloadQueued}
+          />
+        </>
       );
     }
     return (
       <>
-        {message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null}
+        {exaStatusBlock}
         {renderMarkdownContent(primaryAnswerText, message.id)}
       </>
     );
@@ -1105,6 +1134,7 @@ function renderMessageContent(message, options = {}) {
 
   return (
     <>
+      {exaStatusBlock}
       <div className="chat-assistant-think-wrap">
         <ThinkDisclosure id={message.id} label={thinkLabel}>
           {renderMarkdownContent(thinkText, `${message.id}-think`)}
@@ -1291,7 +1321,7 @@ const CLARIFY_TIMEOUT_MS = 25000;
 
 // ── Exa search ──────────────────────────────────────────────────────────────
 
-async function runExaSearch(query) {
+async function runExaSearch(query, stage = "main") {
   try {
     const resp = await fetch(EXA_PROXY_PATH, {
       method: "POST",
@@ -1303,10 +1333,31 @@ async function runExaSearch(query) {
         contents: { highlights: { max_characters: 800 } }
       })
     });
-    if (!resp.ok) return null;
-    return await resp.json();
-  } catch {
-    return null;
+
+    if (!resp.ok) {
+      let detail = "";
+      try {
+        detail = await resp.text();
+      } catch {
+        detail = "";
+      }
+      const errorMessage = `Exa proxy returned ${resp.status}${detail ? `: ${detail.slice(0, 220)}` : ""}`;
+      console.error(`[Exa:${stage}] ${errorMessage}`);
+      return { data: null, error: errorMessage };
+    }
+
+    const data = await resp.json();
+    if (!Array.isArray(data?.results)) {
+      const errorMessage = "Exa response missing results array.";
+      console.error(`[Exa:${stage}] ${errorMessage}`, data);
+      return { data: null, error: errorMessage };
+    }
+
+    return { data, error: "" };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown Exa request error.";
+    console.error(`[Exa:${stage}] request failed: ${errorMessage}`);
+    return { data: null, error: errorMessage };
   }
 }
 
@@ -2150,24 +2201,24 @@ function App() {
     const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
     if (!plannerRequestUrl) throw new Error("Planner endpoint is not configured.");
 
-    // Census/demographic Exa search runs here, after user has answered clarifying questions
-    setChatMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === assistantPendingTurnId ? { ...msg, exaStatus: "searching" } : msg
-      )
-    );
-    const censusExaData = await runExaSearch(buildCensusQuery(enrichedPrompt));
-    setChatMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === assistantPendingTurnId
-          ? { ...msg, exaStatus: censusExaData?.results?.length ? { results: censusExaData.results } : null }
-          : msg
-      )
-    );
-    const exaContext = [
-      formatExaContext(generalExaData),
-      formatCensusExaContext(censusExaData)
-    ].filter(Boolean).join("\n\n");
+    // Exa search runs before planner completion for retrieval context
+    const exaResult = await runExaSearch(enrichedPrompt, "generation");
+    const exaData = exaResult.data;
+    const exaSearchSucceeded = Boolean(exaData?.results?.length);
+    if (exaSearchSucceeded || exaResult.error) {
+      setChatMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantPendingTurnId
+            ? {
+                ...msg,
+                exaWebSearchSuccess: exaSearchSucceeded,
+                exaWebSearchError: exaResult.error ? String(exaResult.error) : ""
+              }
+            : msg
+        )
+      );
+    }
+    const exaContext = formatExaContext(exaData);
 
     const payload = {
       model: PLANNER_MODEL_ID,
@@ -2301,16 +2352,24 @@ function App() {
         throw new Error("Planner endpoint is not configured.");
       }
 
-      // Exa general search runs before clarifying questions so the LLM has web context
-      const generalExaData = await runExaSearch(promptText);
-      const generalExaContext = formatExaContext(generalExaData);
-      setChatMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === clarifyMsgId
-            ? { ...msg, exaStatus: generalExaData?.results?.length ? { results: generalExaData.results } : null }
-            : msg
-        )
-      );
+      // Exa search runs before clarifying questions so follow-ups can use web context too.
+      const clarifyExaResult = await runExaSearch(promptText, "clarify");
+      const clarifyExaData = clarifyExaResult.data;
+      const clarifyExaSucceeded = Boolean(clarifyExaData?.results?.length);
+      if (clarifyExaSucceeded || clarifyExaResult.error) {
+        setChatMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === clarifyMsgId
+              ? {
+                  ...msg,
+                  exaWebSearchSuccess: clarifyExaSucceeded,
+                  exaWebSearchError: clarifyExaResult.error ? String(clarifyExaResult.error) : ""
+                }
+              : msg
+          )
+        );
+      }
+      const clarifyExaContext = formatExaContext(clarifyExaData);
 
       const clarifyPayload = {
         model: PLANNER_MODEL_ID,
@@ -2328,8 +2387,8 @@ function App() {
             content:
               `Simulation request: "${promptText}"\n\n` +
               `Attached context files: ${filesForSubmit.length}\n\n` +
-              (generalExaContext ? `Background research:${generalExaContext}\n\n` : "") +
-              "Determine whether follow-up questions are needed."
+              "Determine whether follow-up questions are needed." +
+              clarifyExaContext
           }
         ]
       };
