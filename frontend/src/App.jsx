@@ -495,91 +495,248 @@ function parseCsvLine(line) {
 }
 
 function extractCsvPayload(text) {
-  const withoutThinking = stripThinkSections(text);
-  if (!withoutThinking) return "";
+  const postThinkSection = stripThinkSections(text);
+  if (!postThinkSection) return "";
 
-  const fencedMatch = withoutThinking.match(/```(?:csv)?\s*\n([\s\S]*?)```/i);
-  const candidate = fencedMatch ? fencedMatch[1].trim() : withoutThinking.trim();
-  if (!candidate) return "";
-
-  const lines = candidate.replace(/\r\n/g, "\n").split("\n");
-  let startIndex = -1;
-  let headerFields = [];
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (!looksLikeCsvLine(line)) continue;
-
-    const fields = parseCsvLine(line).map((field) => field.trim().toLowerCase());
-    const hasAgentId = fields.includes("agent_id");
-    const hasSystemPrompt = fields.includes("system_prompt");
-    const hasConnections = fields.includes("connections");
-
-    if ((hasAgentId && hasSystemPrompt) || (hasAgentId && hasConnections) || /^run_id\s*,\s*agent_id\b/i.test(line.trim())) {
-      startIndex = i;
-      headerFields = parseCsvLine(line);
-      break;
-    }
+  const trimmed = postThinkSection.trim();
+  const fencedMatch = trimmed.match(/^```(?:csv)?\s*\n([\s\S]*?)\n```$/i);
+  if (fencedMatch) {
+    return fencedMatch[1].trim();
   }
-
-  if (startIndex === -1) return "";
-  if (headerFields.length < 2) return "";
-
-  const expectedFieldCount = headerFields.length;
-  const csvLines = [lines[startIndex].trim()];
-
-  for (let i = startIndex + 1; i < lines.length; i += 1) {
-    const line = lines[i].trim();
-    if (!line) break;
-    if (!looksLikeCsvLine(line)) break;
-
-    const rowFields = parseCsvLine(line);
-    if (rowFields.length !== expectedFieldCount) break;
-    csvLines.push(line);
-  }
-
-  if (csvLines.length < 2) return "";
-  return csvLines.join("\n").trim();
+  return trimmed;
 }
 
-function extractRunIdFromCsv(csvText) {
-  const lines = String(csvText || "").split("\n");
-  if (lines.length < 2) return "";
-  if (!/run_id/i.test(lines[0])) return "";
-  const firstRow = lines[1].trim();
-  if (!firstRow) return "";
+function parseCsvRecords(csvText) {
+  const normalized = String(csvText || "").replace(/\r\n/g, "\n").trim();
+  if (!normalized) return { headers: [], rows: [] };
 
-  if (firstRow.startsWith("\"")) {
-    const closingQuoteIndex = firstRow.indexOf("\"", 1);
-    if (closingQuoteIndex > 1) {
-      return firstRow.slice(1, closingQuoteIndex).trim();
+  const rawLines = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (rawLines.length < 2) return { headers: [], rows: [] };
+
+  const headers = parseCsvLine(rawLines[0]).map((header) => header.trim());
+  const rows = [];
+
+  for (let i = 1; i < rawLines.length; i += 1) {
+    const values = parseCsvLine(rawLines[i]);
+    if (values.length === 0) continue;
+
+    const row = {};
+    for (let j = 0; j < headers.length; j += 1) {
+      const key = headers[j] || `column_${j}`;
+      row[key] = String(values[j] || "").trim();
     }
+    rows.push(row);
   }
-  const firstCommaIndex = firstRow.indexOf(",");
-  if (firstCommaIndex === -1) return "";
-  return firstRow.slice(0, firstCommaIndex).trim();
+
+  return { headers, rows };
 }
 
-function downloadCsvArtifact(csvText) {
-  const normalized = String(csvText || "").trim();
-  if (!normalized) return;
+function splitConnectionTokens(rawValue) {
+  return String(rawValue || "")
+    .split(/[|,;]/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
 
-  const runId = extractRunIdFromCsv(normalized);
-  const safeRunId = runId.replace(/[^a-zA-Z0-9_-]+/g, "_");
-  const fallbackStamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filename = safeRunId ? `${safeRunId}.csv` : `planner-output-${fallbackStamp}.csv`;
+function buildNetworkGraphFromCsv(csvText) {
+  const { headers, rows } = parseCsvRecords(csvText);
+  if (headers.length === 0 || rows.length === 0) return null;
 
-  const blob = new Blob([normalized], { type: "text/csv;charset=utf-8;" });
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => {
-    URL.revokeObjectURL(objectUrl);
-  }, 0);
+  const findHeader = (name) =>
+    headers.find((header) => header.trim().toLowerCase() === name.toLowerCase()) || "";
+
+  const idColumn = findHeader("agent_id") || findHeader("id");
+  if (!idColumn) return null;
+
+  const connectionsColumn = findHeader("connections");
+  const nodes = [];
+  const nodeById = new Map();
+
+  for (const row of rows) {
+    const id = String(row[idColumn] || "").trim();
+    if (!id || nodeById.has(id)) continue;
+    const node = {
+      id,
+      label: row.full_name || row.name || id,
+      metadata: row,
+      connections: [],
+      declared_connections: splitConnectionTokens(connectionsColumn ? row[connectionsColumn] : "")
+    };
+    nodes.push(node);
+    nodeById.set(id, node);
+  }
+
+  const edges = [];
+  const edgeSet = new Set();
+  const warnings = [];
+
+  for (const node of nodes) {
+    const resolved = [];
+    for (const target of node.declared_connections) {
+      if (target === node.id) {
+        warnings.push(`Self-connection ignored for ${node.id}.`);
+        continue;
+      }
+      if (!nodeById.has(target)) {
+        warnings.push(`Unresolved connection ${node.id} -> ${target}.`);
+        continue;
+      }
+      resolved.push(target);
+      const left = node.id < target ? node.id : target;
+      const right = node.id < target ? target : node.id;
+      const edgeKey = `${left}::${right}`;
+      if (edgeSet.has(edgeKey)) continue;
+      edgeSet.add(edgeKey);
+      edges.push({ source: left, target: right });
+    }
+    node.connections = Array.from(new Set(resolved)).sort();
+  }
+
+  return {
+    nodes,
+    edges,
+    stats: {
+      node_count: nodes.length,
+      edge_count: edges.length,
+      unresolved_connection_count: warnings.length
+    },
+    warnings
+  };
+}
+
+function summarizeCsvArtifact(csvText) {
+  const payload = extractCsvPayload(csvText);
+  if (!payload) return null;
+
+  const { headers, rows } = parseCsvRecords(payload);
+  if (headers.length === 0) return null;
+  const normalizedHeaders = headers.map((header) => header.trim().toLowerCase());
+
+  const headerCount = headers.length;
+  const rowCount = rows.length;
+  const graph = rowCount > 0 ? buildNetworkGraphFromCsv(payload) : null;
+  const runIdHeader =
+    headers.find((header) => header.trim().toLowerCase() === "run_id") || "";
+  const runId =
+    runIdHeader && rowCount > 0 ? String(rows[0]?.[runIdHeader] || "").trim() : "";
+  const hasAgentIdHeader = normalizedHeaders.includes("agent_id") || normalizedHeaders.includes("id");
+  const hasConnectionsHeader = normalizedHeaders.includes("connections");
+  const hasSystemPromptHeader = normalizedHeaders.includes("system_prompt");
+
+  const isLikelyCsv =
+    rowCount > 0 &&
+    headerCount > 1 &&
+    (hasAgentIdHeader || hasConnectionsHeader || hasSystemPromptHeader);
+
+  if (!isLikelyCsv) return null;
+
+  return {
+    payload,
+    headerCount,
+    rowCount,
+    runId,
+    graph
+  };
+}
+
+function CsvArtifactCard({ summary, pending = false, previewText = "", onOpen = null }) {
+  const rowLabel =
+    summary && summary.rowCount > 0
+      ? `${summary.rowCount} agent${summary.rowCount === 1 ? "" : "s"}`
+      : "Generating rows";
+  const columnLabel =
+    summary && summary.headerCount > 0
+      ? `${summary.headerCount} field${summary.headerCount === 1 ? "" : "s"}`
+      : "Inferring schema";
+  const edgeCount = summary?.graph?.stats?.edge_count;
+  const edgeLabel =
+    typeof edgeCount === "number"
+      ? `${edgeCount} connection${edgeCount === 1 ? "" : "s"}`
+      : "Building graph";
+  const isInteractive = typeof onOpen === "function";
+
+  return (
+    <button
+      type="button"
+      className={`csv-artifact-card ${pending ? "pending" : ""} ${isInteractive ? "interactive" : ""}`}
+      aria-label="Generated CSV artifact"
+      onClick={() => {
+        if (isInteractive) {
+          onOpen();
+        }
+      }}
+      disabled={!isInteractive}
+    >
+      <div className="csv-artifact-badge">CSV</div>
+      <div className="csv-artifact-copy">
+        <p className="csv-artifact-title">Generated Agent Data</p>
+        <p className="csv-artifact-meta">
+          {rowLabel} • {columnLabel} • {edgeLabel}
+          {summary?.runId ? ` • ${summary.runId}` : ""}
+        </p>
+      </div>
+    </button>
+  );
+}
+
+function CsvPreviewTable({ csvText }) {
+  const { headers, rows } = parseCsvRecords(csvText);
+
+  if (!headers.length) {
+    return <p className="artifact-empty">Waiting for CSV content...</p>;
+  }
+
+  return (
+    <div className="artifact-table-wrap">
+      <table className="artifact-table">
+        <thead>
+          <tr>
+            {headers.map((header, index) => (
+              <th key={`csv-header-${index}`}>{header || `column_${index + 1}`}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length > 0 ? (
+            rows.map((row, rowIndex) => (
+              <tr key={`csv-row-${rowIndex}`}>
+                {headers.map((header, colIndex) => (
+                  <td key={`csv-cell-${rowIndex}-${colIndex}`}>
+                    {String(row[header] || "")}
+                  </td>
+                ))}
+              </tr>
+            ))
+          ) : (
+            <tr>
+              <td className="artifact-table-empty" colSpan={headers.length}>
+                Waiting for CSV rows...
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function isLikelyCsvDraft(text) {
+  const payload = extractCsvPayload(text);
+  if (!payload) return false;
+
+  const lines = payload
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) return false;
+
+  const firstLine = lines[0];
+  if (firstLine.startsWith("```")) return true;
+  return looksLikeCsvLine(firstLine);
 }
 
 function thoughtDurationLabel(durationSeconds) {
@@ -616,7 +773,9 @@ function ThinkDisclosure({ id, label, children }) {
   );
 }
 
-function renderMessageContent(message) {
+function renderMessageContent(message, options = {}) {
+  const { onOpenArtifact } = options;
+
   if (message.role !== "assistant") {
     return renderMarkdownContent(message.content, message.id);
   }
@@ -633,9 +792,28 @@ function renderMessageContent(message) {
   const thinkLabel = message.pending
     ? THINKING_PLACEHOLDER_TEXT
     : thoughtDurationLabel(message.thinkingDurationSec);
+  const primaryAnswerText = hasAnswerText ? answerText : messageText;
+  const csvSummary = summarizeCsvArtifact(primaryAnswerText);
+  const showCsvArtifact = Boolean(csvSummary) || isLikelyCsvDraft(primaryAnswerText);
+  const isCsvPending = Boolean(message.pending) || !csvSummary;
+  const artifactPreviewText = (csvSummary?.payload || extractCsvPayload(primaryAnswerText) || "").trim();
 
   if (!hasThinkText) {
-    return renderMarkdownContent(answerText || messageText, message.id);
+    if (showCsvArtifact) {
+      return (
+        <CsvArtifactCard
+          summary={csvSummary}
+          pending={isCsvPending}
+          previewText={artifactPreviewText}
+          onOpen={
+            onOpenArtifact
+              ? () => onOpenArtifact({ messageId: message.id, content: artifactPreviewText })
+              : null
+          }
+        />
+      );
+    }
+    return renderMarkdownContent(primaryAnswerText, message.id);
   }
 
   return (
@@ -645,13 +823,41 @@ function renderMessageContent(message) {
           {renderMarkdownContent(thinkText, `${message.id}-think`)}
         </ThinkDisclosure>
       </div>
-      {hasAnswerText ? (
+      {hasAnswerText && showCsvArtifact ? (
+        <div className="chat-assistant-answer">
+          <CsvArtifactCard
+            summary={csvSummary}
+            pending={isCsvPending}
+            previewText={artifactPreviewText}
+            onOpen={
+              onOpenArtifact
+                ? () => onOpenArtifact({ messageId: message.id, content: artifactPreviewText })
+                : null
+            }
+          />
+        </div>
+      ) : null}
+      {hasAnswerText && !showCsvArtifact ? (
         <div className="chat-assistant-answer">
           {renderMarkdownContent(answerText, `${message.id}-answer`)}
         </div>
       ) : null}
     </>
   );
+}
+
+function messageShouldRenderCsvArtifact(message) {
+  if (!message || message.role !== "assistant") return false;
+
+  const messageText = String(message.content || "");
+  if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
+    return false;
+  }
+
+  const treatUnclosedAsThinking = Boolean(message.pending) || /<think\s*>/i.test(messageText);
+  const { answerText } = splitAssistantThinkContent(messageText, treatUnclosedAsThinking);
+  const primaryAnswerText = answerText.trim() ? answerText : messageText;
+  return Boolean(summarizeCsvArtifact(primaryAnswerText)) || isLikelyCsvDraft(primaryAnswerText);
 }
 
 function consumeSseDataEvents(buffer, onData) {
@@ -901,6 +1107,7 @@ function App() {
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
+  const [artifactModal, setArtifactModal] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isChatMode, setIsChatMode] = useState(false);
   const [isHeroCompacted, setIsHeroCompacted] = useState(false);
@@ -1180,6 +1387,55 @@ function App() {
       window.removeEventListener("keydown", handleEscape);
     };
   }, [previewTarget]);
+
+  useEffect(() => {
+    if (!artifactModal) return undefined;
+
+    const handleEscape = (event) => {
+      if (event.key === "Escape") {
+        setArtifactModal(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [artifactModal]);
+
+  const handleOpenArtifactModal = ({ messageId, content }) => {
+    const normalized = String(content || "").trim();
+    setArtifactModal({
+      messageId: messageId || "",
+      content: normalized
+    });
+  };
+
+  useEffect(() => {
+    if (!artifactModal?.messageId) return;
+
+    const currentMessage = chatMessages.find((message) => message.id === artifactModal.messageId);
+    if (!currentMessage || currentMessage.role !== "assistant") return;
+
+    const messageText = String(currentMessage.content || "");
+    const treatUnclosedAsThinking =
+      Boolean(currentMessage.pending) || /<think\s*>/i.test(messageText);
+    const { answerText } = splitAssistantThinkContent(messageText, treatUnclosedAsThinking);
+    const primaryAnswerText = answerText.trim() ? answerText : messageText;
+    const latestPreview = (
+      summarizeCsvArtifact(primaryAnswerText)?.payload || extractCsvPayload(primaryAnswerText) || ""
+    ).trim();
+
+    if (!latestPreview || latestPreview === artifactModal.content) return;
+
+    setArtifactModal((prev) => {
+      if (!prev || prev.messageId !== artifactModal.messageId) return prev;
+      return {
+        ...prev,
+        content: latestPreview
+      };
+    });
+  }, [chatMessages, artifactModal]);
 
   useEffect(() => {
     setShowSubtitle(false);
@@ -1757,6 +2013,37 @@ function App() {
                 </div>
               ) : null}
               {previewError ? <p className="preview-note warning">{previewError}</p> : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {artifactModal ? (
+        <div
+          className="artifact-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="CSV output preview"
+          onClick={() => setArtifactModal(null)}
+        >
+          <div className="artifact-modal" onClick={(event) => event.stopPropagation()}>
+            <header className="artifact-header">
+              <div className="artifact-header-text">
+                <p className="artifact-title">Generated CSV Content</p>
+                <p className="artifact-meta">Live output preview</p>
+              </div>
+              <button
+                type="button"
+                className="artifact-close-btn"
+                onClick={() => setArtifactModal(null)}
+                aria-label="Close CSV preview"
+              >
+                <img src={closeIcon} alt="" />
+              </button>
+            </header>
+
+            <div className="artifact-content">
+              <CsvPreviewTable csvText={artifactModal.content} />
             </div>
           </div>
         </div>
