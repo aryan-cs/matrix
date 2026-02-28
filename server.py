@@ -44,19 +44,37 @@ app = modal.App(APP_NAME)
 # Persistent volume — weights survive across runs so you only download once.
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
+# Optional Modal secret containing a Hugging Face token. Create a Modal secret
+# named "hf" with the HF token keyed as HF_HUB_TOKEN (see README / instructions).
+HF_SECRET = modal.Secret.from_name("hf")
+
 # ---------------------------------------------------------------------------
 # Step 1: download weights  (run once:  modal run server.py::download_model)
 # ---------------------------------------------------------------------------
 @app.function(
     image=image,
     volumes={MODEL_DIR: volume},
+    secrets=[HF_SECRET],
     timeout=7200,
     cpu=8,
     memory=32768,
 )
 def download_model():
+    import os
     from huggingface_hub import snapshot_download
-    snapshot_download(MODEL_ID, local_dir=MODEL_DIR)
+
+    token = os.environ.get("HF_HUB_TOKEN", "").strip()
+    if not token:
+        print(
+            "Warning: HF_HUB_TOKEN not found in environment. If the model repo is private, create a Modal secret named 'hf' with the token."
+        )
+
+    try:
+        snapshot_download(MODEL_ID, local_dir=MODEL_DIR)
+    except Exception as exc:  # pragma: no cover - surface useful error
+        print(f"Model download failed: {type(exc).__name__}: {exc}")
+        raise
+
     volume.commit()
     print("Done.")
 
@@ -68,6 +86,7 @@ def download_model():
     image=image,
     gpu="A100-80GB:1",
     volumes={MODEL_DIR: volume},
+    secrets=[HF_SECRET],
     timeout=3600,
     scaledown_window=300,
     min_containers=INSTANCE_COUNT,

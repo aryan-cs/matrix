@@ -64,6 +64,10 @@ const ALLOWED_EXTENSIONS = new Set([
 const MAX_TOTAL_FILES = 200;
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 const PLANNER_CONTEXT_ENDPOINT = import.meta.env.VITE_PLANNER_CONTEXT_ENDPOINT || "/api/planner/context";
+const PLANNER_CONTEXT_STREAM_ENDPOINT =
+  import.meta.env.VITE_PLANNER_CONTEXT_STREAM_ENDPOINT || "/api/planner/context/stream";
+const NETWORK_BUILDER_ENDPOINT =
+  import.meta.env.VITE_NETWORK_BUILDER_ENDPOINT || "/api/graph/from-csv-text";
 
 function extensionFor(name) {
   const split = name.split(".");
@@ -101,10 +105,291 @@ function fileNameFromPath(path) {
   return segments.at(-1) || path;
 }
 
+function parseCsvLine(line) {
+  const text = String(line || "");
+  const fields = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === "\"") {
+      if (inQuotes && text[i + 1] === "\"") {
+        current += "\"";
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      fields.push(current);
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  fields.push(current);
+  return fields;
+}
+
+function textAfterFinalThinkTag(rawText) {
+  const normalized = String(rawText || "").replace(/\r\n/g, "\n");
+  const closeTagRegex = /<\/think\s*>/gi;
+  let lastCloseEnd = -1;
+  let match = closeTagRegex.exec(normalized);
+  while (match) {
+    lastCloseEnd = closeTagRegex.lastIndex;
+    match = closeTagRegex.exec(normalized);
+  }
+  if (lastCloseEnd === -1) return normalized.trim();
+  return normalized.slice(lastCloseEnd).trim();
+}
+
+function splitThinkContent(rawText, assumeThinking = false) {
+  const text = String(rawText ?? "");
+  const openMatch = /<think\s*>/i.exec(text);
+  const closeMatch = /<\/think\s*>/i.exec(text);
+
+  if (closeMatch && (!openMatch || closeMatch.index < openMatch.index)) {
+    return {
+      thinkingText: text.slice(0, closeMatch.index),
+      finalText: text.slice(closeMatch.index + closeMatch[0].length)
+    };
+  }
+
+  if (openMatch && closeMatch && closeMatch.index > openMatch.index) {
+    const beforeOpen = text.slice(0, openMatch.index);
+    const insideThink = text.slice(openMatch.index + openMatch[0].length, closeMatch.index);
+    return {
+      thinkingText: `${beforeOpen}${insideThink}`,
+      finalText: text.slice(closeMatch.index + closeMatch[0].length)
+    };
+  }
+
+  if (openMatch && !closeMatch) {
+    return {
+      thinkingText: `${text.slice(0, openMatch.index)}${text.slice(
+        openMatch.index + openMatch[0].length
+      )}`,
+      finalText: ""
+    };
+  }
+
+  if (assumeThinking) {
+    return {
+      thinkingText: text,
+      finalText: ""
+    };
+  }
+
+  return {
+    thinkingText: "",
+    finalText: text
+  };
+}
+
+function extractCsvPayloadFromPlannerText(rawText) {
+  const postThinkText = textAfterFinalThinkTag(rawText);
+  if (!postThinkText) return "";
+
+  const fencedMatch = postThinkText.match(/```(?:csv)?\s*\n([\s\S]*?)```/i);
+  const candidate = (fencedMatch ? fencedMatch[1] : postThinkText).trim();
+  if (!candidate) return "";
+
+  const lines = candidate.replace(/\r\n/g, "\n").split("\n");
+  let headerIndex = -1;
+  let headerFieldCount = 0;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line || !line.includes(",")) continue;
+    const lowered = line.toLowerCase();
+    if (lowered.includes("agent_id") && lowered.includes("connections") && lowered.includes("system_prompt")) {
+      headerIndex = i;
+      headerFieldCount = parseCsvLine(line).length;
+      break;
+    }
+  }
+
+  if (headerIndex === -1 || headerFieldCount < 2) return "";
+
+  const csvLines = [lines[headerIndex].trim()];
+  for (let i = headerIndex + 1; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line || !line.includes(",")) break;
+    if (parseCsvLine(line).length !== headerFieldCount) break;
+    csvLines.push(line);
+  }
+
+  return csvLines.length >= 2 ? csvLines.join("\n") : "";
+}
+
+function compactSnippet(text, maxChars = 180) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 1)}...`;
+}
+
+function createLocalMessageId(prefix = "msg") {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function plannerTextFromBody(body) {
+  if (!body) return "";
+  if (typeof body === "string") return body;
+  if (typeof body.output_text === "string") return body.output_text;
+  if (typeof body.completion === "string") return body.completion;
+  const choiceContent = body?.choices?.[0]?.message?.content;
+  if (typeof choiceContent === "string") return choiceContent;
+  return "";
+}
+
+function escapeHtml(text) {
+  return String(text ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function inlineMarkdownToHtml(text) {
+  let html = escapeHtml(text);
+  const codeTokens = [];
+
+  html = html.replace(/`([^`\n]+)`/g, (_, code) => {
+    const token = `@@CODE_TOKEN_${codeTokens.length}@@`;
+    codeTokens.push(`<code>${code}</code>`);
+    return token;
+  });
+
+  html = html.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noreferrer">$1</a>'
+  );
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  html = html.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  html = html.replace(/_([^_\n]+)_/g, "<em>$1</em>");
+  html = html.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
+  codeTokens.forEach((token, index) => {
+    html = html.replace(`@@CODE_TOKEN_${index}@@`, token);
+  });
+
+  return html;
+}
+
+function markdownToHtml(text) {
+  const input = String(text ?? "").replace(/\r\n/g, "\n");
+  if (!input.trim()) return "";
+
+  const lines = input.split("\n");
+  const blocks = [];
+  let index = 0;
+
+  const isSpecialStart = (line) =>
+    /^#{1,6}\s+/.test(line) ||
+    /^[-*+]\s+/.test(line) ||
+    /^\d+\.\s+/.test(line) ||
+    /^(```)/.test(line) ||
+    /^(-{3,}|\*{3,}|_{3,})\s*$/.test(line);
+
+  while (index < lines.length) {
+    const rawLine = lines[index];
+    const line = rawLine.trim();
+
+    if (!line) {
+      index += 1;
+      continue;
+    }
+
+    if (line.startsWith("```")) {
+      const lang = line.slice(3).trim();
+      index += 1;
+      const codeLines = [];
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : "";
+      blocks.push(
+        `<pre><code${langClass}>${escapeHtml(codeLines.join("\n"))}</code></pre>`
+      );
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      blocks.push(`<h${level}>${inlineMarkdownToHtml(headingMatch[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      blocks.push("<hr />");
+      index += 1;
+      continue;
+    }
+
+    if (/^[-*+]\s+/.test(line)) {
+      const items = [];
+      while (index < lines.length) {
+        const candidate = lines[index].trim();
+        const match = candidate.match(/^[-*+]\s+(.+)$/);
+        if (!match) break;
+        items.push(`<li>${inlineMarkdownToHtml(match[1])}</li>`);
+        index += 1;
+      }
+      blocks.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const items = [];
+      while (index < lines.length) {
+        const candidate = lines[index].trim();
+        const match = candidate.match(/^\d+\.\s+(.+)$/);
+        if (!match) break;
+        items.push(`<li>${inlineMarkdownToHtml(match[1])}</li>`);
+        index += 1;
+      }
+      blocks.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+
+    const paragraphLines = [];
+    while (index < lines.length) {
+      const candidateRaw = lines[index];
+      const candidate = candidateRaw.trim();
+      if (!candidate) break;
+      if (paragraphLines.length > 0 && isSpecialStart(candidate)) break;
+      paragraphLines.push(inlineMarkdownToHtml(candidateRaw));
+      index += 1;
+    }
+    blocks.push(`<p>${paragraphLines.join("<br />")}</p>`);
+  }
+
+  return blocks.join("");
+}
+
 function App() {
   const [displayTitle, setDisplayTitle] = useState(TITLE_TEXT);
   const [showSubtitle, setShowSubtitle] = useState(false);
   const [scenarioText, setScenarioText] = useState("");
+  const [chatStarted, setChatStarted] = useState(false);
+  const [messages, setMessages] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [previewTarget, setPreviewTarget] = useState(null);
   const [previewMode, setPreviewMode] = useState("none");
@@ -116,6 +401,7 @@ function App() {
   const [submitNotice, setSubmitNotice] = useState({ kind: "idle", message: "" });
   const [showSubmitNotice, setShowSubmitNotice] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [expandedThinkingIds, setExpandedThinkingIds] = useState(() => new Set());
   const [placeholderText, setPlaceholderText] = useState(
     examplePrompts[0].startsWith(SHARED_PREFIX) ? SHARED_PREFIX : ""
   );
@@ -127,6 +413,8 @@ function App() {
   const removeTimersRef = useRef(new Map());
   const contextChipRefs = useRef(new Map());
   const previousChipPositionsRef = useRef(new Map());
+  const chatScrollRef = useRef(null);
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
 
   useEffect(() => {
     contextFilesRef.current = contextFiles;
@@ -368,6 +656,13 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (chatStarted) {
+      if (placeholderText !== "") {
+        setPlaceholderText("");
+      }
+      return undefined;
+    }
+
     const currentPrompt = examplePrompts[promptIndex];
     const retainedPrefixLength = currentPrompt.startsWith(SHARED_PREFIX) ? SHARED_PREFIX.length : 0;
     let delay = isDeleting ? DELETING_SPEED_MS : TYPING_SPEED_MS;
@@ -401,7 +696,17 @@ function App() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [isDeleting, placeholderText, promptIndex]);
+  }, [isDeleting, placeholderText, promptIndex, chatStarted]);
+
+  useEffect(() => {
+    if (!autoScrollEnabled) return;
+    const node = chatScrollRef.current;
+    if (!node) return;
+    node.scrollTo({
+      top: node.scrollHeight,
+      behavior: "smooth"
+    });
+  }, [messages, autoScrollEnabled]);
 
   const addContextFiles = (files) => {
     const incoming = Array.from(files);
@@ -499,11 +804,165 @@ function App() {
     removeTimersRef.current.set(fileId, timerId);
   };
 
+  const updateAssistantMessage = (assistantMessageId, patch) => {
+    setMessages((prev) =>
+      prev.map((message) =>
+        message.id === assistantMessageId
+          ? {
+              ...message,
+              ...patch
+            }
+          : message
+      )
+    );
+  };
+
+  const setThinkingPanelExpanded = (messageId, expanded) => {
+    setExpandedThinkingIds((prev) => {
+      const next = new Set(prev);
+      if (expanded) {
+        next.add(messageId);
+      } else {
+        next.delete(messageId);
+      }
+      return next;
+    });
+  };
+
+  const streamPlannerText = async ({ formData, assistantMessageId }) => {
+    const response = await fetch(PLANNER_CONTEXT_STREAM_ENDPOINT, {
+      method: "POST",
+      body: formData
+    });
+
+    if (response.status === 404) {
+      const fallbackResponse = await fetch(PLANNER_CONTEXT_ENDPOINT, {
+        method: "POST",
+        body: formData
+      });
+      if (!fallbackResponse.ok) {
+        throw new Error(`Planner endpoint responded ${fallbackResponse.status}`);
+      }
+      const contentType = fallbackResponse.headers.get("content-type") || "";
+      const rawText = contentType.includes("application/json")
+        ? plannerTextFromBody(await fallbackResponse.json())
+        : await fallbackResponse.text();
+      updateAssistantMessage(assistantMessageId, {
+        content: rawText || "Planner returned an empty response.",
+        thinking: false,
+        error: false
+      });
+      setThinkingPanelExpanded(assistantMessageId, false);
+      return rawText;
+    }
+
+    if (!response.ok) {
+      let detail = "";
+      try {
+        detail = await response.text();
+      } catch {
+        detail = "";
+      }
+      throw new Error(
+        `Planner endpoint responded ${response.status}${
+          detail ? `: ${compactSnippet(detail, 240)}` : ""
+        }`
+      );
+    }
+
+    if (!response.body) {
+      const fallbackText = await response.text();
+      updateAssistantMessage(assistantMessageId, {
+        content: fallbackText || "Planner returned an empty response.",
+        thinking: false,
+        error: false
+      });
+      setThinkingPanelExpanded(assistantMessageId, false);
+      return fallbackText;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let aggregateText = "";
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      let delimiterIndex = buffer.indexOf("\n\n");
+      while (delimiterIndex !== -1) {
+        const eventChunk = buffer.slice(0, delimiterIndex);
+        buffer = buffer.slice(delimiterIndex + 2);
+
+        const lines = eventChunk
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim());
+
+        for (const line of lines) {
+          if (!line) continue;
+          if (line === "[DONE]") {
+            setThinkingPanelExpanded(assistantMessageId, false);
+            updateAssistantMessage(assistantMessageId, {
+              content: aggregateText || "Planner returned an empty response.",
+              thinking: false,
+              error: false
+            });
+            return aggregateText;
+          }
+
+          let parsed;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue;
+          }
+
+          const chunkError = parsed?.error;
+          if (chunkError) {
+            throw new Error(String(chunkError));
+          }
+
+          const delta =
+            parsed?.delta ||
+            parsed?.choices?.[0]?.delta?.content ||
+            parsed?.choices?.[0]?.message?.content ||
+            "";
+
+          if (!delta) continue;
+          aggregateText += String(delta);
+          const hasThinkCloseTag = /<\/think\s*>/i.test(aggregateText);
+          setThinkingPanelExpanded(assistantMessageId, !hasThinkCloseTag);
+          updateAssistantMessage(assistantMessageId, {
+            content: aggregateText,
+            thinking: !hasThinkCloseTag,
+            error: false
+          });
+        }
+
+        delimiterIndex = buffer.indexOf("\n\n");
+      }
+    }
+
+    updateAssistantMessage(assistantMessageId, {
+      content: aggregateText || "Planner returned an empty response.",
+      thinking: false,
+      error: false
+    });
+    setThinkingPanelExpanded(assistantMessageId, false);
+    return aggregateText;
+  };
+
   const handleComposerSubmit = async (event) => {
     event.preventDefault();
     const filesForSubmit = contextFiles.filter((file) => !removingContextIds.has(file.id));
+    const promptText = scenarioText.trim();
 
-    if (!scenarioText.trim() && filesForSubmit.length === 0) {
+    if (!promptText && filesForSubmit.length === 0) {
       setSubmitNotice({
         kind: "warning",
         message: "Add a prompt or at least one context file before submitting."
@@ -511,11 +970,39 @@ function App() {
       return;
     }
 
+    const assistantMessageId = createLocalMessageId("assistant");
+    const userMessageText = promptText || `Attached ${filesForSubmit.length} context file(s).`;
+
+    setChatStarted(true);
+    setAutoScrollEnabled(true);
+    setThinkingPanelExpanded(assistantMessageId, true);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: createLocalMessageId("user"),
+        role: "user",
+        content: userMessageText,
+        thinking: false,
+        error: false
+      },
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "Thinking...",
+        thinking: true,
+        error: false
+      }
+    ]);
+
+    setScenarioText("");
     setIsSubmitting(true);
     setSubmitNotice({ kind: "idle", message: "" });
 
     const formData = new FormData();
-    formData.append("prompt", scenarioText.trim());
+    formData.append(
+      "prompt",
+      promptText || "Use the attached context files to generate representative simulation agents."
+    );
     formData.append(
       "context_manifest",
       JSON.stringify(
@@ -532,25 +1019,62 @@ function App() {
     });
 
     try {
-      const response = await fetch(PLANNER_CONTEXT_ENDPOINT, {
+      const plannerText = await streamPlannerText({
+        formData,
+        assistantMessageId
+      });
+      const csvPayload = extractCsvPayloadFromPlannerText(plannerText);
+
+      if (!csvPayload) {
+        setSubmitNotice({
+          kind: "warning",
+          message:
+            "Planner response rendered, but no valid CSV block was detected after </think>. " +
+            `Preview: "${compactSnippet(textAfterFinalThinkTag(plannerText))}"`
+        });
+        return;
+      }
+
+      const graphResponse = await fetch(NETWORK_BUILDER_ENDPOINT, {
         method: "POST",
-        body: formData
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          csv_text: csvPayload,
+          directed: false
+        })
       });
 
-      if (!response.ok) {
-        throw new Error(`Planner endpoint responded ${response.status}`);
+      if (!graphResponse.ok) {
+        let detail = "";
+        try {
+          const payload = await graphResponse.json();
+          detail = payload?.detail || "";
+        } catch {
+          detail = "";
+        }
+        throw new Error(
+          `Network builder responded ${graphResponse.status}${detail ? `: ${detail}` : ""}`
+        );
       }
+
+      const graph = await graphResponse.json();
+      window.__MATRIX_LAST_GRAPH__ = graph;
 
       setSubmitNotice({
         kind: "success",
-        message: `Submitted prompt + ${filesForSubmit.length} context file(s) to the planner.`
+        message: `Built graph with ${graph?.stats?.node_count ?? 0} nodes and ${graph?.stats?.edge_count ?? 0} edges.`
       });
     } catch (error) {
+      updateAssistantMessage(assistantMessageId, {
+        content: error?.message || "Planner/network pipeline failed.",
+        thinking: false,
+        error: true
+      });
       setSubmitNotice({
         kind: "warning",
-        message:
-          `Could not reach planner endpoint (${PLANNER_CONTEXT_ENDPOINT}). ` +
-          "Context files remain attached locally."
+        message: error?.message || "Planner/network pipeline failed."
       });
     } finally {
       setIsSubmitting(false);
@@ -577,13 +1101,54 @@ function App() {
       />
 
       <main className="main-panel">
-        <section className="hero">
-          <div className="hero-copy">
+        <section className={`hero ${chatStarted ? "active-chat" : ""}`}>
+          <div className={`hero-copy ${chatStarted ? "faded" : ""}`}>
             <h1>{displayTitle}</h1>
             <p className={`hero-subtitle ${showSubtitle ? "visible" : ""}`}>Simulate Anything</p>
           </div>
 
-          <form className="composer-shell" onSubmit={handleComposerSubmit}>
+          <div
+            className={`chat-thread ${chatStarted ? "visible" : "hidden"}`}
+            ref={chatScrollRef}
+            onScroll={(event) => {
+              const node = event.currentTarget;
+              const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+              setAutoScrollEnabled(distanceFromBottom < 52);
+            }}
+          >
+            <div className="chat-thread-inner">
+              {messages.map((message) => (
+                (() => {
+                  const isAssistant = message.role === "assistant";
+                  const { thinkingText, finalText } = isAssistant
+                    ? splitThinkContent(message.content)
+                    : { thinkingText: "", finalText: message.content };
+
+                  return (
+                    <article
+                      key={message.id}
+                      className={`chat-message ${message.role} ${message.thinking ? "thinking" : ""} ${
+                        message.error ? "error" : ""
+                      }`}
+                    >
+                      {isAssistant && thinkingText ? (
+                        <pre className="chat-message-text chat-thinking-text">{thinkingText}</pre>
+                      ) : null}
+                      {isAssistant && finalText ? (
+                        <pre className="chat-message-text">{finalText}</pre>
+                      ) : null}
+                      {!isAssistant ? <pre className="chat-message-text">{message.content}</pre> : null}
+                      {isAssistant && !thinkingText && !finalText ? (
+                        <pre className="chat-message-text">{message.content}</pre>
+                      ) : null}
+                    </article>
+                  );
+                })()
+              ))}
+            </div>
+          </div>
+
+          <form className={`composer-shell ${chatStarted ? "docked" : ""}`} onSubmit={handleComposerSubmit}>
             <div className={`composer-frame ${contextFiles.length > 0 ? "with-context" : ""}`}>
               <div
                 className={`context-preview-wrapper ${contextFiles.length > 0 ? "visible" : "hidden"}`}

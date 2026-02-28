@@ -156,7 +156,7 @@
   - `uv venv`
   - `uv sync`
 - Run backend locally:
-  - `uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000`
+  - `uv run uvicorn network_builder:app --reload --host 127.0.0.1 --port 8000`
 - Run backend tests:
   - `uv run pytest`
 - Run background/maintenance tasks (examples):
