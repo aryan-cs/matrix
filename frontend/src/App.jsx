@@ -3,6 +3,7 @@ import DotWaveBackground from "./components/DotWaveBackground";
 import addIcon from "../assets/icons/add.svg";
 import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
+import downloadIcon from "../assets/icons/download.svg";
 import dropdownIcon from "../assets/icons/dropdown.svg";
 import plannerSystemPromptRaw from "../../planner-system-prompt.txt?raw";
 
@@ -703,7 +704,48 @@ function summarizeCsvArtifact(csvText) {
   };
 }
 
-function CsvArtifactCard({ summary, pending = false, previewText = "", onOpen = null }) {
+function formatCsvDownloadFilename(runId = "") {
+  const safeRunId = String(runId || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const prefix = safeRunId || "planner-output";
+  return `${prefix}-${stamp}.csv`;
+}
+
+function downloadCsvArtifact(csvPayload, runId = "") {
+  const normalized = String(csvPayload || "").trim();
+  if (!normalized) return false;
+
+  const blob = new Blob([normalized.endsWith("\n") ? normalized : `${normalized}\n`], {
+    type: "text/csv;charset=utf-8"
+  });
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = formatCsvDownloadFilename(runId);
+  anchor.rel = "noopener";
+
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 1000);
+
+  return true;
+}
+
+function CsvArtifactCard({
+  summary,
+  pending = false,
+  previewText = "",
+  onOpen = null,
+  onDownload = null,
+  downloadQueued = false
+}) {
   const rowLabel =
     summary && summary.rowCount > 0
       ? `${summary.rowCount} agent${summary.rowCount === 1 ? "" : "s"}`
@@ -718,28 +760,51 @@ function CsvArtifactCard({ summary, pending = false, previewText = "", onOpen = 
       ? `${edgeCount} connection${edgeCount === 1 ? "" : "s"}`
       : "Building graph";
   const isInteractive = typeof onOpen === "function";
+  const canDownload = typeof onDownload === "function";
+  const downloadLabel = pending
+    ? downloadQueued
+      ? "Queued"
+      : "Queue Download"
+    : "Download CSV";
 
   return (
-    <button
-      type="button"
-      className={`csv-artifact-card ${pending ? "pending" : ""} ${isInteractive ? "interactive" : ""}`}
-      aria-label="Generated CSV artifact"
-      onClick={() => {
-        if (isInteractive) {
-          onOpen();
-        }
-      }}
-      disabled={!isInteractive}
-    >
-      <div className="csv-artifact-badge">CSV</div>
-      <div className="csv-artifact-copy">
-        <p className="csv-artifact-title">Generated Agent Data</p>
-        <p className="csv-artifact-meta">
-          {rowLabel} • {columnLabel} • {edgeLabel}
-          {summary?.runId ? ` • ${summary.runId}` : ""}
-        </p>
-      </div>
-    </button>
+    <div className={`csv-artifact-card ${pending ? "pending" : ""}`}>
+      <button
+        type="button"
+        className={`csv-artifact-main ${isInteractive ? "interactive" : ""}`}
+        aria-label="Generated CSV artifact"
+        onClick={() => {
+          if (isInteractive) {
+            onOpen();
+          }
+        }}
+        disabled={!isInteractive}
+      >
+        <div className="csv-artifact-badge">CSV</div>
+        <div className="csv-artifact-copy">
+          <p className="csv-artifact-title">Generated Agent Data</p>
+          <p className="csv-artifact-meta">
+            {rowLabel} • {columnLabel} • {edgeLabel}
+            {summary?.runId ? ` • ${summary.runId}` : ""}
+          </p>
+        </div>
+      </button>
+      <button
+        type="button"
+        className={`csv-artifact-download ${downloadQueued ? "queued" : ""}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (canDownload) {
+            onDownload();
+          }
+        }}
+        disabled={!canDownload}
+        aria-label={downloadLabel}
+        title={downloadLabel}
+      >
+        <img src={downloadIcon} alt="" />
+      </button>
+    </div>
   );
 }
 
@@ -851,7 +916,7 @@ function ThinkDisclosure({ id, label, children }) {
 }
 
 function renderMessageContent(message, options = {}) {
-  const { onOpenArtifact } = options;
+  const { onOpenArtifact, onQueueArtifactDownload, isArtifactDownloadQueued } = options;
 
   if (message.role !== "assistant") {
     return renderMarkdownContent(message.content, message.id);
@@ -881,6 +946,8 @@ function renderMessageContent(message, options = {}) {
   const showCsvArtifact = Boolean(csvSummary) || isLikelyCsvDraft(primaryAnswerText);
   const isCsvPending = Boolean(message.pending) || !csvSummary;
   const artifactPreviewText = (csvSummary?.payload || extractCsvPayload(primaryAnswerText) || "").trim();
+  const downloadQueued =
+    typeof isArtifactDownloadQueued === "function" ? isArtifactDownloadQueued(message.id) : false;
 
   if (!hasThinkText) {
     if (showCsvArtifact) {
@@ -894,6 +961,18 @@ function renderMessageContent(message, options = {}) {
               ? () => onOpenArtifact({ messageId: message.id, content: artifactPreviewText })
               : null
           }
+          onDownload={
+            onQueueArtifactDownload
+              ? () =>
+                  onQueueArtifactDownload({
+                    messageId: message.id,
+                    content: artifactPreviewText,
+                    runId: csvSummary?.runId || "",
+                    pending: isCsvPending
+                  })
+              : null
+          }
+          downloadQueued={downloadQueued}
         />
       );
     }
@@ -918,6 +997,18 @@ function renderMessageContent(message, options = {}) {
                 ? () => onOpenArtifact({ messageId: message.id, content: artifactPreviewText })
                 : null
             }
+            onDownload={
+              onQueueArtifactDownload
+                ? () =>
+                    onQueueArtifactDownload({
+                      messageId: message.id,
+                      content: artifactPreviewText,
+                      runId: csvSummary?.runId || "",
+                      pending: isCsvPending
+                    })
+                : null
+            }
+            downloadQueued={downloadQueued}
           />
         </div>
       ) : null}
@@ -1167,6 +1258,7 @@ function App() {
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [artifactModal, setArtifactModal] = useState(null);
+  const [queuedArtifactDownloadIds, setQueuedArtifactDownloadIds] = useState(() => new Set());
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isChatMode, setIsChatMode] = useState(false);
   const [isHeroCompacted, setIsHeroCompacted] = useState(false);
@@ -1469,6 +1561,59 @@ function App() {
     });
   };
 
+  const isArtifactDownloadQueued = (messageId) => queuedArtifactDownloadIds.has(messageId);
+
+  const handleQueueArtifactDownload = ({ messageId, content, runId = "", pending = false }) => {
+    const payload = String(content || "").trim();
+    if (!messageId) return;
+
+    if (!pending && payload) {
+      downloadCsvArtifact(payload, runId);
+      return;
+    }
+
+    setQueuedArtifactDownloadIds((prev) => {
+      const next = new Set(prev);
+      next.add(messageId);
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (queuedArtifactDownloadIds.size === 0) return;
+
+    const completed = [];
+
+    queuedArtifactDownloadIds.forEach((messageId) => {
+      const currentMessage = chatMessages.find(
+        (message) => message.id === messageId && message.role === "assistant"
+      );
+      if (!currentMessage) return;
+
+      const messageText = String(currentMessage.content || "");
+      const treatUnclosedAsThinking =
+        Boolean(currentMessage.pending) || /<think\s*>/i.test(messageText);
+      const { answerText } = splitAssistantThinkContent(messageText, treatUnclosedAsThinking);
+      const primaryAnswerText = answerText.trim() ? answerText : messageText;
+      const summary = summarizeCsvArtifact(primaryAnswerText);
+
+      if (currentMessage.pending || !summary?.payload) return;
+
+      const didDownload = downloadCsvArtifact(summary.payload, summary.runId || messageId);
+      if (didDownload) {
+        completed.push(messageId);
+      }
+    });
+
+    if (completed.length === 0) return;
+
+    setQueuedArtifactDownloadIds((prev) => {
+      const next = new Set(prev);
+      completed.forEach((messageId) => next.delete(messageId));
+      return next;
+    });
+  }, [chatMessages, queuedArtifactDownloadIds]);
+
   useEffect(() => {
     if (!artifactModal?.messageId) return;
 
@@ -1743,9 +1888,6 @@ function App() {
 
     if (!plannerText) throw new Error("Planner endpoint returned no completion content.");
 
-    const csvPayload = extractCsvPayload(plannerText);
-    if (csvPayload) downloadCsvArtifact(csvPayload);
-
     const completionTimeMs = Date.now();
     setChatMessages((prev) =>
       prev.map((msg) =>
@@ -1925,7 +2067,11 @@ function App() {
                       className={`chat-bubble ${message.role} ${message.pending ? "pending" : ""} ${message.error ? "error" : ""} ${isArtifactMessage ? "artifact" : ""}`}
                     >
                       <div className="chat-content">
-                        {renderMessageContent(message, { onOpenArtifact: handleOpenArtifactModal })}
+                        {renderMessageContent(message, {
+                          onOpenArtifact: handleOpenArtifactModal,
+                          onQueueArtifactDownload: handleQueueArtifactDownload,
+                          isArtifactDownloadQueued
+                        })}
                       </div>
                     </div>
                   </article>

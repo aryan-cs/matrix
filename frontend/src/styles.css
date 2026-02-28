@@ -454,15 +454,11 @@ input {
 }
 
 .csv-artifact-card {
-  appearance: none;
-  border: none;
   display: flex;
   align-items: center;
   gap: 12px;
   width: 100%;
   max-width: 100%;
-  text-align: left;
-  font: inherit;
   border-radius: 16px;
   padding: 12px 14px;
   background: rgba(255, 255, 255, 0.04);
@@ -476,19 +472,38 @@ input {
   animation: csv-glow 1.6s var(--ease-soft) infinite;
 }
 
-.csv-artifact-card.interactive {
+.csv-artifact-main {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-radius: 12px;
+  cursor: default;
+}
+
+.csv-artifact-main.interactive {
   cursor: pointer;
 }
 
-.csv-artifact-card.interactive:hover {
+.csv-artifact-main.interactive:hover {
   transform: translateY(-1px);
 }
 
-.csv-artifact-card.interactive:active {
+.csv-artifact-main.interactive:active {
   transform: translateY(0);
 }
 
-.csv-artifact-card:focus-visible {
+.csv-artifact-main:focus-visible,
+.csv-artifact-download:focus-visible {
   outline: none;
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.16),
@@ -515,6 +530,7 @@ input {
 
 .csv-artifact-copy {
   min-width: 0;
+  flex: 1;
   display: grid;
   gap: 3px;
 }
@@ -533,6 +549,48 @@ input {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.csv-artifact-download {
+  border: none;
+  border-radius: 999px;
+  height: 34px;
+  width: 34px;
+  flex: 0 0 auto;
+  min-width: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  transition: transform var(--motion-fast) var(--ease-spring), background var(--motion-fast) var(--ease-soft), opacity var(--motion-fast) var(--ease-soft);
+}
+
+.csv-artifact-download img {
+  width: 16px;
+  height: 16px;
+  display: block;
+  object-fit: contain;
+  object-position: center;
+  pointer-events: none;
+}
+
+.csv-artifact-download:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.csv-artifact-download:active {
+  transform: scale(0.96);
+}
+
+.csv-artifact-download:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.csv-artifact-download.queued {
+  background: rgba(255, 255, 255, 0.22);
 }
 
 .chat-content h1,
