@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import DotWaveBackground from "./components/DotWaveBackground";
-import GraphCirclePanel from "./components/GraphCirclePanel";
+import AgentLiveAvatarCard from "./components/AgentLiveAvatarCard";
 import addIcon from "../assets/icons/add.svg";
 import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
@@ -33,16 +33,8 @@ const CHIP_REPOSITION_ANIMATION_MS = 620;
 const CHAT_ENTER_TRANSITION_MS = 620;
 const CHAT_INITIAL_MESSAGE_STAGGER_MS = 500;
 const COMPOSER_DOCK_ANIMATION_MS = 680;
-const ARTIFACT_MODAL_EXIT_MS = 220;
 const THINKING_PLACEHOLDER_TEXT = "Thinking...";
 const EXA_SUCCESS_PLACEHOLDER_TEXT = "Searched the web with Exa.";
-const STREAM_REVEAL_MIN_CHARS = 2;
-const STREAM_REVEAL_MAX_CHARS = 20;
-const STREAM_REVEAL_RATIO = 0.24;
-const GRAPH_PANEL_DEFAULT_WIDTH = 360;
-const GRAPH_PANEL_MIN_WIDTH = 280;
-const GRAPH_PANEL_MAX_WIDTH = 760;
-const GRAPH_PANEL_MIN_MAIN_WIDTH = 460;
 const DEFAULT_PLANNER_SYSTEM_PROMPT =
   "You are a simulation planner assistant. Use provided prompt + context files to draft planning assumptions and key demographic factors.";
 const PLANNER_SYSTEM_PROMPT = (plannerSystemPromptRaw || "").trim() || DEFAULT_PLANNER_SYSTEM_PROMPT;
@@ -525,48 +517,6 @@ function parseCsvLine(line) {
   return fields;
 }
 
-function normalizeCsvToken(value) {
-  return String(value ?? "").trim().toLowerCase();
-}
-
-function isRepeatedHeaderRow(values, normalizedHeaders) {
-  if (!Array.isArray(values) || values.length < normalizedHeaders.length) return false;
-  for (let i = 0; i < normalizedHeaders.length; i += 1) {
-    if (normalizeCsvToken(values[i]) !== normalizedHeaders[i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function alignCsvRowValues(values, headerCount) {
-  if (!Array.isArray(values) || headerCount <= 0) return null;
-  if (values.length === headerCount) return values;
-  if (values.length > headerCount) {
-    // Recover unquoted commas by collapsing overflow into the last column.
-    return [
-      ...values.slice(0, headerCount - 1),
-      values.slice(headerCount - 1).join(",")
-    ];
-  }
-  return [...values, ...Array(headerCount - values.length).fill("")];
-}
-
-function escapeCsvValue(value) {
-  const text = String(value ?? "");
-  if (!/[",\n]/.test(text)) return text;
-  return `"${text.replace(/"/g, "\"\"")}"`;
-}
-
-function serializeCsvRecords(headers, rows) {
-  if (!Array.isArray(headers) || headers.length === 0) return "";
-  const headerLine = headers.map((header) => escapeCsvValue(header)).join(",");
-  const bodyLines = (rows || []).map((row) =>
-    headers.map((header) => escapeCsvValue(row?.[header] ?? "")).join(",")
-  );
-  return [headerLine, ...bodyLines].join("\n").trim();
-}
-
 function extractCsvPayload(text) {
   const postThinkSection = stripThinkSections(text);
   if (!postThinkSection) return "";
@@ -630,38 +580,17 @@ function parseCsvRecords(csvText) {
   if (rawLines.length < 2) return { headers: [], rows: [] };
 
   const headers = parseCsvLine(rawLines[0]).map((header) => header.trim());
-  if (headers.length < 2) return { headers: [], rows: [] };
-  const normalizedHeaders = headers.map((header) => normalizeCsvToken(header));
-  const idHeader =
-    headers.find((header) => normalizeCsvToken(header) === "agent_id") ||
-    headers.find((header) => normalizeCsvToken(header) === "id") ||
-    "";
-  const seenAgentIds = new Set();
   const rows = [];
 
   for (let i = 1; i < rawLines.length; i += 1) {
-    const parsedValues = parseCsvLine(rawLines[i]).map((value) => String(value ?? "").trim());
-    const values = alignCsvRowValues(parsedValues, headers.length);
-    if (!values || !values.some((value) => value.length > 0)) continue;
-    if (isRepeatedHeaderRow(values, normalizedHeaders)) continue;
+    const values = parseCsvLine(rawLines[i]);
+    if (values.length === 0) continue;
 
     const row = {};
     for (let j = 0; j < headers.length; j += 1) {
       const key = headers[j] || `column_${j}`;
       row[key] = String(values[j] || "").trim();
     }
-
-    if (idHeader) {
-      const rawAgentId = String(row[idHeader] || "").trim();
-      if (!rawAgentId || normalizeCsvToken(rawAgentId) === normalizeCsvToken(idHeader)) {
-        continue;
-      }
-      if (seenAgentIds.has(rawAgentId)) {
-        continue;
-      }
-      seenAgentIds.add(rawAgentId);
-    }
-
     rows.push(row);
   }
 
@@ -747,12 +676,11 @@ function summarizeCsvArtifact(csvText) {
 
   const { headers, rows } = parseCsvRecords(payload);
   if (headers.length === 0) return null;
-  const normalizedPayload = serializeCsvRecords(headers, rows);
   const normalizedHeaders = headers.map((header) => header.trim().toLowerCase());
 
   const headerCount = headers.length;
   const rowCount = rows.length;
-  const graph = rowCount > 0 ? buildNetworkGraphFromCsv(normalizedPayload) : null;
+  const graph = rowCount > 0 ? buildNetworkGraphFromCsv(payload) : null;
   const runIdHeader =
     headers.find((header) => header.trim().toLowerCase() === "run_id") || "";
   const runId =
@@ -769,7 +697,7 @@ function summarizeCsvArtifact(csvText) {
   if (!isLikelyCsv) return null;
 
   return {
-    payload: normalizedPayload,
+    payload,
     headerCount,
     rowCount,
     runId,
@@ -785,28 +713,6 @@ function formatCsvDownloadFilename(runId = "") {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const prefix = safeRunId || "planner-output";
   return `${prefix}-${stamp}.csv`;
-}
-
-function extractRequestedSampleCountFromPrompt(promptText) {
-  const text = String(promptText || "");
-  if (!text) return null;
-
-  const patterns = [
-    /\bn\s*=\s*(\d{1,4})\b/i,
-    /\bwith\s+(\d{1,4})\s+(?:representatives?|agents?|samples?)\b/i,
-    /\b(\d{1,4})\s+(?:representatives?|agents?|samples?)\b/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (!match?.[1]) continue;
-    const count = Number.parseInt(match[1], 10);
-    if (Number.isFinite(count) && count > 0) {
-      return count;
-    }
-  }
-
-  return null;
 }
 
 function downloadCsvArtifact(csvPayload, runId = "") {
@@ -836,16 +742,24 @@ function downloadCsvArtifact(csvPayload, runId = "") {
 function CsvArtifactCard({
   summary,
   pending = false,
-  totalCount = null,
   previewText = "",
   onOpen = null,
   onDownload = null,
   downloadQueued = false
 }) {
-  const resolvedTotalCount =
-    Number.isFinite(totalCount) && totalCount > 0 ? Math.max(1, Math.round(totalCount)) : null;
-  const generatedCount = summary?.rowCount ?? 0;
-  const progressLabel = resolvedTotalCount ? `${generatedCount}/${resolvedTotalCount} samples generated` : "";
+  const rowLabel =
+    summary && summary.rowCount > 0
+      ? `${summary.rowCount} agent${summary.rowCount === 1 ? "" : "s"}`
+      : "Generating rows";
+  const columnLabel =
+    summary && summary.headerCount > 0
+      ? `${summary.headerCount} field${summary.headerCount === 1 ? "" : "s"}`
+      : "Inferring schema";
+  const edgeCount = summary?.graph?.stats?.edge_count;
+  const edgeLabel =
+    typeof edgeCount === "number"
+      ? `${edgeCount} connection${edgeCount === 1 ? "" : "s"}`
+      : "Building graph";
   const isInteractive = typeof onOpen === "function";
   const canDownload = typeof onDownload === "function";
   const downloadLabel = pending
@@ -870,7 +784,10 @@ function CsvArtifactCard({
         <div className="csv-artifact-badge">CSV</div>
         <div className="csv-artifact-copy">
           <p className="csv-artifact-title">Generated Agent Data</p>
-          {progressLabel ? <p className="csv-artifact-meta">{progressLabel}</p> : null}
+          <p className="csv-artifact-meta">
+            {rowLabel} • {columnLabel} • {edgeLabel}
+            {summary?.runId ? ` • ${summary.runId}` : ""}
+          </p>
         </div>
       </button>
       <button
@@ -999,34 +916,6 @@ function ThinkDisclosure({ id, label, children }) {
   );
 }
 
-function domainFromUrl(url) {
-  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; }
-}
-
-function ExaStatusPill({ status }) {
-  if (!status) return null;
-  const isSearching = status === "searching";
-  const results = typeof status === "object" ? status.results : null;
-  if (!isSearching && !results?.length) return null;
-  return (
-    <div className="exa-fetched-wrap">
-      {isSearching && (
-        <div className="exa-fetched-searching">
-          <span className="exa-fetched-label">exa</span>
-          <span className="exa-pill-dots"><span /><span /><span /></span>
-        </div>
-      )}
-      {results && results.map((r, i) => (
-        <a key={i} className="exa-fetched-row" href={r.url} target="_blank" rel="noreferrer"
-           style={{ animationDelay: `${i * 70}ms` }}>
-          <span className="exa-fetched-text">Fetched: {r.title || domainFromUrl(r.url)}</span>
-          <span className="exa-fetched-arrow">›</span>
-        </a>
-      ))}
-    </div>
-  );
-}
-
 function renderMessageContent(message, options = {}) {
   const { onOpenArtifact, onQueueArtifactDownload, isArtifactDownloadQueued } = options;
 
@@ -1035,15 +924,13 @@ function renderMessageContent(message, options = {}) {
   }
 
   const messageText = String(message.content || "");
-  if (message.uiType === "status-tooltip") {
-    return <p className="chat-status-tooltip">{messageText}</p>;
-  }
-
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
     return (
       <>
         <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
-        {message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null}
+        {message.exaWebSearchSuccess ? (
+          <p className="chat-exa-success-placeholder">{EXA_SUCCESS_PLACEHOLDER_TEXT}</p>
+        ) : null}
       </>
     );
   }
@@ -1062,10 +949,6 @@ function renderMessageContent(message, options = {}) {
   const artifactPreviewText = (csvSummary?.payload || extractCsvPayload(primaryAnswerText) || "").trim();
   const downloadQueued =
     typeof isArtifactDownloadQueued === "function" ? isArtifactDownloadQueued(message.id) : false;
-  const requestedSampleCount =
-    Number.isFinite(message.requestedSampleCount) && message.requestedSampleCount > 0
-      ? message.requestedSampleCount
-      : null;
 
   if (!hasThinkText) {
     if (showCsvArtifact) {
@@ -1073,7 +956,6 @@ function renderMessageContent(message, options = {}) {
         <CsvArtifactCard
           summary={csvSummary}
           pending={isCsvPending}
-          totalCount={requestedSampleCount}
           previewText={artifactPreviewText}
           onOpen={
             onOpenArtifact
@@ -1095,12 +977,7 @@ function renderMessageContent(message, options = {}) {
         />
       );
     }
-    return (
-      <>
-        {message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null}
-        {renderMarkdownContent(primaryAnswerText, message.id)}
-      </>
-    );
+    return renderMarkdownContent(primaryAnswerText, message.id);
   }
 
   return (
@@ -1110,13 +987,11 @@ function renderMessageContent(message, options = {}) {
           {renderMarkdownContent(thinkText, `${message.id}-think`)}
         </ThinkDisclosure>
       </div>
-      {message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null}
       {hasAnswerText && showCsvArtifact ? (
         <div className="chat-assistant-answer">
           <CsvArtifactCard
             summary={csvSummary}
             pending={isCsvPending}
-            totalCount={requestedSampleCount}
             previewText={artifactPreviewText}
             onOpen={
               onOpenArtifact
@@ -1149,7 +1024,6 @@ function renderMessageContent(message, options = {}) {
 
 function messageShouldRenderCsvArtifact(message) {
   if (!message || message.role !== "assistant") return false;
-  if (message.uiType === "status-tooltip") return false;
 
   const messageText = String(message.content || "");
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
@@ -1289,6 +1163,60 @@ async function buildPlannerContextBlock(files) {
 
 const CLARIFY_TIMEOUT_MS = 25000;
 
+async function fetchClarifyingQuestions(promptText) {
+  const url = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
+  const reqUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : url;
+  if (!reqUrl) return null;
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), CLARIFY_TIMEOUT_MS);
+
+  try {
+    const resp = await fetch(reqUrl, {
+      signal: controller.signal,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(!USE_PLANNER_DEV_PROXY && PLANNER_API_KEY
+          ? { Authorization: `Bearer ${PLANNER_API_KEY}` }
+          : {})
+      },
+      body: JSON.stringify({
+        model: PLANNER_MODEL_ID,
+        temperature: 0.5,
+        stream: false,
+        max_tokens: 2000,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a helpful assistant. After any internal reasoning, you MUST end your response with a numbered list of exactly 3 clarifying questions, formatted as:\n1. [question]\n2. [question]\n3. [question]"
+          },
+          {
+            role: "user",
+            content: `Simulation request: "${promptText}"\n\nAsk 3 clarifying questions.`
+          }
+        ]
+      })
+    });
+
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const raw = data?.choices?.[0]?.message?.content || "";
+    const cleaned = stripThinkSections(raw);
+    // Extract numbered question lines — robust regardless of surrounding reasoning text
+    const questionLines = cleaned
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^\d+[\.\)]\s+\S/.test(l));
+    return questionLines.length > 0 ? questionLines.join("\n") : null;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 // ── Exa search ──────────────────────────────────────────────────────────────
 
 async function runExaSearch(query) {
@@ -1320,24 +1248,12 @@ function formatExaContext(exaData) {
   return `\n\n[Web research via Exa — ${exaData.results.length} sources]\n${snippets.join("\n\n")}`;
 }
 
-function buildCensusQuery(prompt) {
-  return `census demographics population statistics survey data ${prompt}`;
-}
-
-function formatCensusExaContext(exaData) {
-  if (!exaData?.results?.length) return "";
-  const snippets = exaData.results.map((r, i) => {
-    const title = r.title || r.url || `Source ${i + 1}`;
-    const highlight = r.highlights?.[0]?.text || r.highlights?.[0] || "";
-    return `[${i + 1}] ${title}\n${highlight}`;
-  });
-  return `\n\n[Census & demographic data via Exa — ${exaData.results.length} sources]\n${snippets.join("\n\n")}`;
-}
-
 function App() {
   const [displayTitle, setDisplayTitle] = useState(TITLE_TEXT);
   const [showSubtitle, setShowSubtitle] = useState(false);
   const [scenarioText, setScenarioText] = useState("");
+  const [chatStarted, setChatStarted] = useState(false);
+  const [messages, setMessages] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [previewTarget, setPreviewTarget] = useState(null);
   const [previewMode, setPreviewMode] = useState("none");
@@ -1345,15 +1261,10 @@ function App() {
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [artifactModal, setArtifactModal] = useState(null);
-  const [isArtifactModalClosing, setIsArtifactModalClosing] = useState(false);
   const [queuedArtifactDownloadIds, setQueuedArtifactDownloadIds] = useState(() => new Set());
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isChatMode, setIsChatMode] = useState(false);
   const [isHeroCompacted, setIsHeroCompacted] = useState(false);
-  const [isGraphPanelOpen, setIsGraphPanelOpen] = useState(false);
-  const [graphPanelGraph, setGraphPanelGraph] = useState(null);
-  const [graphPanelWidth, setGraphPanelWidth] = useState(GRAPH_PANEL_DEFAULT_WIDTH);
-  const [isGraphPanelResizing, setIsGraphPanelResizing] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
   const [placeholderText, setPlaceholderText] = useState(
     examplePrompts[0].startsWith(SHARED_PREFIX) ? SHARED_PREFIX : ""
@@ -1369,31 +1280,17 @@ function App() {
   const heroCopyRef = useRef(null);
   const contextFilesRef = useRef(contextFiles);
   const removeTimersRef = useRef(new Map());
-  const artifactModalCloseTimerRef = useRef(0);
   const contextChipRefs = useRef(new Map());
   const previousChipPositionsRef = useRef(new Map());
   const composerStartRectRef = useRef(null);
   const wasHeroCompactedRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
-  const graphPanelResizeRef = useRef({
-    active: false,
-    startX: 0,
-    startWidth: GRAPH_PANEL_DEFAULT_WIDTH
-  });
 
   useEffect(() => {
     contextFilesRef.current = contextFiles;
   }, [contextFiles]);
 
   const isChatActive = isChatMode;
-  const clampGraphPanelWidth = (candidateWidth) => {
-    const viewportWidth = window.innerWidth || GRAPH_PANEL_MAX_WIDTH + GRAPH_PANEL_MIN_MAIN_WIDTH;
-    const maxWidth = Math.max(0, Math.min(GRAPH_PANEL_MAX_WIDTH, viewportWidth - GRAPH_PANEL_MIN_MAIN_WIDTH));
-    if (maxWidth <= 0) return 0;
-    const minWidth = Math.min(GRAPH_PANEL_MIN_WIDTH, maxWidth);
-    return Math.min(maxWidth, Math.max(minWidth, Math.round(candidateWidth)));
-  };
-
   const updateAutoScrollLock = () => {
     const chatNode = chatScrollRef.current;
     if (!chatNode) return;
@@ -1548,67 +1445,8 @@ function App() {
         window.clearTimeout(timerId);
       });
       removeTimersRef.current.clear();
-      if (artifactModalCloseTimerRef.current) {
-        window.clearTimeout(artifactModalCloseTimerRef.current);
-        artifactModalCloseTimerRef.current = 0;
-      }
     };
   }, []);
-
-  useEffect(() => {
-    const handleResize = () => {
-      setGraphPanelWidth((previous) => clampGraphPanelWidth(previous));
-    };
-    handleResize();
-    window.addEventListener("resize", handleResize);
-    return () => {
-      window.removeEventListener("resize", handleResize);
-    };
-  }, []);
-
-  useEffect(() => {
-    const handlePointerMove = (event) => {
-      if (!graphPanelResizeRef.current.active) return;
-      const deltaX = event.clientX - graphPanelResizeRef.current.startX;
-      const nextWidth = clampGraphPanelWidth(graphPanelResizeRef.current.startWidth + deltaX);
-      setGraphPanelWidth(nextWidth);
-    };
-
-    const handlePointerStop = () => {
-      if (!graphPanelResizeRef.current.active) return;
-      graphPanelResizeRef.current.active = false;
-      setIsGraphPanelResizing(false);
-    };
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerStop);
-    window.addEventListener("pointercancel", handlePointerStop);
-
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerStop);
-      window.removeEventListener("pointercancel", handlePointerStop);
-    };
-  }, []);
-
-  const handleGraphPanelResizeStart = (event) => {
-    if (!isGraphPanelOpen || event.button !== 0) return;
-    event.preventDefault();
-    graphPanelResizeRef.current = {
-      active: true,
-      startX: event.clientX,
-      startWidth: graphPanelWidth
-    };
-    setIsGraphPanelResizing(true);
-  };
-
-  const handleGraphPanelResizeKeyDown = (event) => {
-    if (!isGraphPanelOpen) return;
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const delta = event.key === "ArrowRight" ? 18 : -18;
-    setGraphPanelWidth((previous) => clampGraphPanelWidth(previous + delta));
-  };
 
   useEffect(() => {
     if (!previewTarget) {
@@ -1703,25 +1541,12 @@ function App() {
     };
   }, [previewTarget]);
 
-  const closeArtifactModalWithAnimation = () => {
-    if (!artifactModal || isArtifactModalClosing) return;
-    setIsArtifactModalClosing(true);
-    if (artifactModalCloseTimerRef.current) {
-      window.clearTimeout(artifactModalCloseTimerRef.current);
-    }
-    artifactModalCloseTimerRef.current = window.setTimeout(() => {
-      setArtifactModal(null);
-      setIsArtifactModalClosing(false);
-      artifactModalCloseTimerRef.current = 0;
-    }, ARTIFACT_MODAL_EXIT_MS);
-  };
-
   useEffect(() => {
     if (!artifactModal) return undefined;
 
     const handleEscape = (event) => {
       if (event.key === "Escape") {
-        closeArtifactModalWithAnimation();
+        setArtifactModal(null);
       }
     };
 
@@ -1729,14 +1554,9 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleEscape);
     };
-  }, [artifactModal, isArtifactModalClosing]);
+  }, [artifactModal]);
 
   const handleOpenArtifactModal = ({ messageId, content }) => {
-    if (artifactModalCloseTimerRef.current) {
-      window.clearTimeout(artifactModalCloseTimerRef.current);
-      artifactModalCloseTimerRef.current = 0;
-    }
-    setIsArtifactModalClosing(false);
     const normalized = String(content || "").trim();
     setArtifactModal({
       messageId: messageId || "",
@@ -1999,175 +1819,24 @@ function App() {
     removeTimersRef.current.set(fileId, timerId);
   };
 
-  const streamPlannerReplyIntoMessage = async ({
-    requestUrl,
-    payload,
-    assistantTurnId,
-    timeoutMs = 0
-  }) => {
-    const controller = new AbortController();
-    const timerId =
-      timeoutMs > 0
-        ? window.setTimeout(() => {
-            controller.abort();
-          }, timeoutMs)
-        : 0;
-
-    let response;
-    try {
-      response = await fetch(requestUrl, {
-        signal: controller.signal,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(!USE_PLANNER_DEV_PROXY && PLANNER_API_KEY
-            ? { Authorization: `Bearer ${PLANNER_API_KEY}` }
-            : {})
-        },
-        body: JSON.stringify(payload)
-      });
-    } finally {
-      if (timerId) {
-        window.clearTimeout(timerId);
-      }
-    }
-
-    if (!response.ok) {
-      let detail = "";
-      try { detail = await response.text(); } catch { detail = ""; }
-      throw new Error(`Planner endpoint responded ${response.status}${detail ? `: ${detail.slice(0, 220)}` : ""}`);
-    }
-
-    const responseContentType = response.headers.get("content-type") || "";
-    let assistantText = "";
-
-    if (responseContentType.includes("text/event-stream")) {
-      let targetText = "";
-      let displayedText = "";
-      let streamDone = false;
-      let revealRafId = 0;
-      let revealResolved = false;
-      let resolveRevealCompletion;
-      const revealCompletion = new Promise((resolve) => {
-        resolveRevealCompletion = resolve;
-      });
-
-      const emitPartial = () => {
-        setChatMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantTurnId
-              ? { ...msg, content: displayedText || THINKING_PLACEHOLDER_TEXT, pending: true }
-              : msg
-          )
-        );
-      };
-
-      const resolveIfComplete = () => {
-        if (!streamDone) return;
-        if (displayedText.length < targetText.length) return;
-        if (revealResolved) return;
-        revealResolved = true;
-        resolveRevealCompletion();
-      };
-
-      const revealStep = () => {
-        revealRafId = 0;
-        if (displayedText.length < targetText.length) {
-          const remaining = targetText.length - displayedText.length;
-          const step = Math.min(
-            STREAM_REVEAL_MAX_CHARS,
-            Math.max(STREAM_REVEAL_MIN_CHARS, Math.ceil(remaining * STREAM_REVEAL_RATIO))
-          );
-          displayedText = targetText.slice(0, displayedText.length + step);
-          emitPartial();
-          revealRafId = window.requestAnimationFrame(revealStep);
-          return;
-        }
-        resolveIfComplete();
-      };
-
-      const scheduleReveal = () => {
-        if (revealRafId) return;
-        revealRafId = window.requestAnimationFrame(revealStep);
-      };
-
-      try {
-        assistantText = await readPlannerResponseStream(response, (partialText) => {
-          targetText = partialText || "";
-          if (targetText.length < displayedText.length) {
-            displayedText = targetText;
-            emitPartial();
-          }
-          scheduleReveal();
-        });
-
-        targetText = assistantText || targetText;
-        streamDone = true;
-        scheduleReveal();
-        await revealCompletion;
-      } finally {
-        if (revealRafId) {
-          window.cancelAnimationFrame(revealRafId);
-          revealRafId = 0;
-        }
-      }
-    } else {
-      const plannerResponse = await response.json();
-      assistantText = plannerResponse?.choices?.[0]?.message?.content || "";
-    }
-
-    if (!assistantText) {
-      throw new Error("Planner endpoint returned no completion content.");
-    }
-
-    const completionTimeMs = Date.now();
-    setChatMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === assistantTurnId
-          ? {
-              ...msg,
-              content: assistantText,
-              pending: false,
-              thinkingDurationSec: Math.max(
-                0.1,
-                (completionTimeMs - (typeof msg.startedAtMs === "number" ? msg.startedAtMs : completionTimeMs)) / 1000
-              )
-            }
-          : msg
-      )
-    );
-
-    if (shouldAutoScrollRef.current) {
-      window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
-    }
-
-    return assistantText;
-  };
-
-  const runMainQuery = async (enrichedPrompt, filesForSubmit, assistantPendingTurnId, generalExaData = null) => {
+  const runMainQuery = async (enrichedPrompt, filesForSubmit, assistantPendingTurnId) => {
     const plannerContext = await buildPlannerContextBlock(filesForSubmit);
     const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
     const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
     if (!plannerRequestUrl) throw new Error("Planner endpoint is not configured.");
 
-    // Census/demographic Exa search runs here, after user has answered clarifying questions
-    setChatMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === assistantPendingTurnId ? { ...msg, exaStatus: "searching" } : msg
-      )
-    );
-    const censusExaData = await runExaSearch(buildCensusQuery(enrichedPrompt));
-    setChatMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === assistantPendingTurnId
-          ? { ...msg, exaStatus: censusExaData?.results?.length ? { results: censusExaData.results } : null }
-          : msg
-      )
-    );
-    const exaContext = [
-      formatExaContext(generalExaData),
-      formatCensusExaContext(censusExaData)
-    ].filter(Boolean).join("\n\n");
+    // Exa search runs before planner completion for retrieval context
+    const exaPromise = runExaSearch(enrichedPrompt);
+    const exaData = await exaPromise;
+    const exaSearchSucceeded = Boolean(exaData?.results?.length);
+    if (exaSearchSucceeded) {
+      setChatMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantPendingTurnId ? { ...msg, exaWebSearchSuccess: true } : msg
+        )
+      );
+    }
+    const exaContext = formatExaContext(exaData);
 
     const payload = {
       model: PLANNER_MODEL_ID,
@@ -2184,30 +1853,60 @@ function App() {
         }
       ]
     };
-    const plannerText = await streamPlannerReplyIntoMessage({
-      requestUrl: plannerRequestUrl,
-      payload,
-      assistantTurnId: assistantPendingTurnId
+
+    const response = await fetch(plannerRequestUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(!USE_PLANNER_DEV_PROXY && PLANNER_API_KEY
+          ? { Authorization: `Bearer ${PLANNER_API_KEY}` }
+          : {})
+      },
+      body: JSON.stringify(payload)
     });
 
-    const csvPayload = extractCsvPayload(plannerText);
-    if (!csvPayload) return;
-    const sampleCount = parseCsvRecords(csvPayload).rows.length;
-    const derivedGraph = buildNetworkGraphFromCsv(csvPayload);
-    setGraphPanelGraph(derivedGraph && Array.isArray(derivedGraph.nodes) ? derivedGraph : null);
-    setChatMessages((prev) => [
-      ...prev,
-      {
-        id: createRuntimeId("assistant"),
-        role: "assistant",
-        content: `Generated ${sampleCount} samples.\nPlugging into the Matrix...`,
-        uiType: "status-tooltip"
-      }
-    ]);
+    if (!response.ok) {
+      let detail = "";
+      try { detail = await response.text(); } catch { detail = ""; }
+      throw new Error(`Planner endpoint responded ${response.status}${detail ? `: ${detail.slice(0, 220)}` : ""}`);
+    }
 
-    window.setTimeout(() => {
-      setIsGraphPanelOpen(true);
-    }, 220);
+    const responseContentType = response.headers.get("content-type") || "";
+    let plannerText = "";
+
+    if (responseContentType.includes("text/event-stream")) {
+      plannerText = await readPlannerResponseStream(response, (partialText) => {
+        setChatMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantPendingTurnId
+              ? { ...msg, content: partialText || THINKING_PLACEHOLDER_TEXT, pending: true }
+              : msg
+          )
+        );
+      });
+    } else {
+      const plannerResponse = await response.json();
+      plannerText = plannerResponse?.choices?.[0]?.message?.content || "";
+    }
+
+    if (!plannerText) throw new Error("Planner endpoint returned no completion content.");
+
+    const completionTimeMs = Date.now();
+    setChatMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === assistantPendingTurnId
+          ? {
+              ...msg,
+              content: plannerText,
+              pending: false,
+              thinkingDurationSec: Math.max(
+                0.1,
+                (completionTimeMs - (typeof msg.startedAtMs === "number" ? msg.startedAtMs : completionTimeMs)) / 1000
+              )
+            }
+          : msg
+      )
+    );
 
     if (shouldAutoScrollRef.current) {
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
@@ -2221,9 +1920,8 @@ function App() {
     // If we're waiting for clarification answers, treat this as the user's reply
     if (clarifyState) {
       if (!promptText) return;
-      const { originalPrompt, filesForSubmit, generalExaData } = clarifyState;
+      const { originalPrompt, filesForSubmit } = clarifyState;
       const enrichedPrompt = `${originalPrompt}\n\nUser's clarifications: ${promptText}`;
-      const requestedSampleCount = extractRequestedSampleCountFromPrompt(enrichedPrompt);
 
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
       const assistantPendingTurnId = createRuntimeId("assistant");
@@ -2234,19 +1932,12 @@ function App() {
       setChatMessages((prev) => [
         ...prev,
         userTurn,
-        {
-          id: assistantPendingTurnId,
-          role: "assistant",
-          content: THINKING_PLACEHOLDER_TEXT,
-          pending: true,
-          startedAtMs: Date.now(),
-          requestedSampleCount
-        }
+        { id: assistantPendingTurnId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, startedAtMs: Date.now() }
       ]);
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
 
       try {
-        await runMainQuery(enrichedPrompt, filesForSubmit, assistantPendingTurnId, generalExaData);
+        await runMainQuery(enrichedPrompt, filesForSubmit, assistantPendingTurnId);
       } catch (error) {
         const failureTimeMs = Date.now();
         setChatMessages((prev) =>
@@ -2285,112 +1976,26 @@ function App() {
 
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText || "[No prompt provided]" };
       const clarifyMsgId = createRuntimeId("assistant");
-      const requestedSampleCount = extractRequestedSampleCountFromPrompt(promptText);
 
       setChatMessages((prev) => [
         ...prev,
         userTurn,
-        { id: clarifyMsgId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, exaStatus: "searching" }
+        { id: clarifyMsgId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true }
       ]);
       setScenarioText("");
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
 
-      const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
-      const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
-      if (!plannerRequestUrl) {
-        throw new Error("Planner endpoint is not configured.");
-      }
+      const clarifyText = await fetchClarifyingQuestions(promptText);
 
-      // Exa general search runs before clarifying questions so the LLM has web context
-      const generalExaData = await runExaSearch(promptText);
-      const generalExaContext = formatExaContext(generalExaData);
-      setChatMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === clarifyMsgId
-            ? { ...msg, exaStatus: generalExaData?.results?.length ? { results: generalExaData.results } : null }
-            : msg
-        )
-      );
-
-      const clarifyPayload = {
-        model: PLANNER_MODEL_ID,
-        temperature: 0.5,
-        stream: true,
-        max_tokens: 2000,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a simulation planner assistant. Decide whether clarifying questions are necessary before generating high-quality representative samples.\n\nRules:\n- Ask follow-up questions ONLY if the request is underspecified for accurate representative generation.\n- If clarification is NOT needed, output exactly: NO_FOLLOWUPS\n- If clarification IS needed, output ONLY a numbered list of questions (no prose), with as many questions as needed (1 or more).\n- Keep questions concrete and directly tied to improving representative quality, segmentation, and constraints.\n- Do not include explanations, preambles, or summaries."
-          },
-          {
-            role: "user",
-            content:
-              `Simulation request: "${promptText}"\n\n` +
-              `Attached context files: ${filesForSubmit.length}\n\n` +
-              (generalExaContext ? `Background research:${generalExaContext}\n\n` : "") +
-              "Determine whether follow-up questions are needed."
-          }
-        ]
-      };
-
-      const clarifyText = await streamPlannerReplyIntoMessage({
-        requestUrl: plannerRequestUrl,
-        payload: clarifyPayload,
-        assistantTurnId: clarifyMsgId,
-        timeoutMs: CLARIFY_TIMEOUT_MS
-      });
-
-      const cleanedClarifyText = stripThinkSections(clarifyText);
-      if (cleanedClarifyText.trim().toUpperCase() === "NO_FOLLOWUPS") {
-        const assistantPendingTurnId = createRuntimeId("assistant");
-        setChatMessages((prev) => [
-          ...prev.filter((m) => m.id !== clarifyMsgId),
-          {
-            id: assistantPendingTurnId,
-            role: "assistant",
-            content: THINKING_PLACEHOLDER_TEXT,
-            pending: true,
-            startedAtMs: Date.now(),
-            requestedSampleCount
-          }
-        ]);
-        try {
-          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId, generalExaData);
-        } catch (error) {
-          const failureTimeMs = Date.now();
-          setChatMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantPendingTurnId
-                ? { ...msg, content: `Planner request failed: ${error.message || "Unknown error."}`, pending: false, error: true, thinkingDurationSec: Math.max(0.1, (failureTimeMs - (typeof msg.startedAtMs === "number" ? msg.startedAtMs : failureTimeMs)) / 1000) }
-                : msg
-            )
-          );
-        }
-        return;
-      }
-
-      const questionLines = cleanedClarifyText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => /^\d+[\.\)]\s+\S/.test(line));
-
-      if (questionLines.length === 0) {
+      if (!clarifyText) {
         // Timed out or failed — go straight to main response
         const assistantPendingTurnId = createRuntimeId("assistant");
         setChatMessages((prev) => [
           ...prev.filter((m) => m.id !== clarifyMsgId),
-          {
-            id: assistantPendingTurnId,
-            role: "assistant",
-            content: THINKING_PLACEHOLDER_TEXT,
-            pending: true,
-            startedAtMs: Date.now(),
-            requestedSampleCount
-          }
+          { id: assistantPendingTurnId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, startedAtMs: Date.now() }
         ]);
         try {
-          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId, generalExaData);
+          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId);
         } catch (error) {
           const failureTimeMs = Date.now();
           setChatMessages((prev) =>
@@ -2404,8 +2009,11 @@ function App() {
         return;
       }
 
-      // Clarifying response is already streamed and finalized; now wait for user follow-up.
-      setClarifyState({ originalPrompt: promptText, filesForSubmit, generalExaData });
+      // Mark clarify message as done and wait for user's reply
+      setChatMessages((prev) =>
+        prev.map((m) => m.id === clarifyMsgId ? { ...m, content: clarifyText, pending: false } : m)
+      );
+      setClarifyState({ originalPrompt: promptText, filesForSubmit });
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
 
     } catch (error) {
@@ -2416,12 +2024,7 @@ function App() {
   };
 
   return (
-    <div
-      className={`app-shell ${isGraphPanelOpen ? "graph-panel-open" : ""} ${
-        isGraphPanelResizing ? "graph-panel-resizing" : ""
-      }`}
-      style={{ "--graph-panel-width": `${graphPanelWidth}px` }}
-    >
+    <div className="app-shell">
       <DotWaveBackground />
 
       <input
@@ -2433,20 +2036,8 @@ function App() {
         onChange={handleFilePickerChange}
       />
 
-      <aside className={`graph-panel-shell ${isGraphPanelOpen ? "open" : ""}`} aria-hidden={!isGraphPanelOpen}>
-        <section className="graph-panel" aria-label="Network graph panel">
-          <GraphCirclePanel graph={graphPanelGraph} />
-        </section>
-        <button
-          type="button"
-          className="graph-panel-resizer"
-          aria-label="Resize network graph panel"
-          onPointerDown={handleGraphPanelResizeStart}
-          onKeyDown={handleGraphPanelResizeKeyDown}
-        />
-      </aside>
-
       <main className="main-panel">
+        <AgentLiveAvatarCard />
         <section
           className={`hero ${isHeroCompacted ? "chat-active" : ""} ${
             isHeroCompacted && contextFiles.length > 0 ? "chat-active-with-context" : ""
@@ -2471,19 +2062,13 @@ function App() {
               <div className="chat-spacer" aria-hidden="true" />
               {chatMessages.map((message) => {
                 const isArtifactMessage = messageShouldRenderCsvArtifact(message);
-                const isStatusTooltipMessage =
-                  message.role === "assistant" && message.uiType === "status-tooltip";
                 return (
                   <article
-                    className={`chat-row ${message.role} ${isArtifactMessage ? "artifact" : ""} ${
-                      isStatusTooltipMessage ? "status-tooltip" : ""
-                    }`}
+                    className={`chat-row ${message.role} ${isArtifactMessage ? "artifact" : ""}`}
                     key={message.id}
                   >
                     <div
-                      className={`chat-bubble ${message.role} ${message.pending ? "pending" : ""} ${message.error ? "error" : ""} ${isArtifactMessage ? "artifact" : ""} ${
-                        isStatusTooltipMessage ? "status-tooltip" : ""
-                      }`}
+                      className={`chat-bubble ${message.role} ${message.pending ? "pending" : ""} ${message.error ? "error" : ""} ${isArtifactMessage ? "artifact" : ""}`}
                     >
                       <div className="chat-content">
                         {renderMessageContent(message, {
@@ -2647,11 +2232,11 @@ function App() {
 
       {artifactModal ? (
         <div
-          className={`artifact-backdrop ${isArtifactModalClosing ? "closing" : ""}`}
+          className="artifact-backdrop"
           role="dialog"
           aria-modal="true"
           aria-label="CSV output preview"
-          onClick={closeArtifactModalWithAnimation}
+          onClick={() => setArtifactModal(null)}
         >
           <div className="artifact-modal" onClick={(event) => event.stopPropagation()}>
             <header className="artifact-header">
@@ -2662,7 +2247,7 @@ function App() {
               <button
                 type="button"
                 className="artifact-close-btn"
-                onClick={closeArtifactModalWithAnimation}
+                onClick={() => setArtifactModal(null)}
                 aria-label="Close CSV preview"
               >
                 <img src={closeIcon} alt="" />

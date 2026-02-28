@@ -37,7 +37,7 @@ function readJsonBody(req) {
       }
       try {
         resolve(JSON.parse(raw));
-      } catch (error) {
+      } catch {
         reject(new Error("Invalid JSON body"));
       }
     });
@@ -153,7 +153,7 @@ function plannerLoggingProxy(env) {
         } catch (error) {
           console.log("PLANNER RESPONSE");
           console.log(`id: ${requestId}`);
-          console.log(`status: network_error`);
+          console.log("status: network_error");
           console.log(`error: ${error.message}`);
           console.log("========================================");
 
@@ -226,7 +226,7 @@ function plannerLoggingProxy(env) {
             }
             console.log("PLANNER RESPONSE");
             console.log(`id: ${requestId}`);
-            console.log(`status: stream_error`);
+            console.log("status: stream_error");
             console.log(`error: ${error.message}`);
             console.log("========================================");
             return;
@@ -237,7 +237,7 @@ function plannerLoggingProxy(env) {
           console.log(`id: ${requestId}`);
           console.log(`status: ${upstreamResponse.status}`);
           console.log(`duration_ms: ${elapsedMs}`);
-          console.log(`mode: stream`);
+          console.log("mode: stream");
           console.log(`chunks: ${chunkCount}`);
           console.log(`assistant-preview: ${previewText(assistantAggregate) || "[empty]"}`);
           console.log("========================================");
@@ -247,14 +247,14 @@ function plannerLoggingProxy(env) {
         let upstreamText = "";
         try {
           upstreamText = await upstreamResponse.text();
-        } catch (error) {
+        } catch {
           upstreamText = "";
         }
 
         let parsed;
         try {
           parsed = JSON.parse(upstreamText);
-        } catch (error) {
+        } catch {
           parsed = null;
         }
 
@@ -340,26 +340,16 @@ function exaProxy(env) {
 export default defineConfig(({ mode }) => {
   const env = {
     ...loadEnv(mode, path.resolve(process.cwd(), ".."), ""),
-    ...loadEnv(mode, process.cwd(), ""),
+    ...loadEnv(mode, process.cwd(), "")
   };
+
   return {
     plugins: [react(), plannerLoggingProxy(env), exaProxy(env)],
     server: {
       proxy: {
         "/api": {
-          target: env.VITE_BACKEND_PROXY_TARGET || "http://127.0.0.1:8000",
-          changeOrigin: true,
-          ws: true,
-          bypass(req) {
-            const requestUrl = req.url || "";
-            if (
-              requestUrl.startsWith("/api/planner/chat") ||
-              requestUrl.startsWith("/api/exa/search")
-            ) {
-              return requestUrl;
-            }
-            return undefined;
-          }
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true
         }
       }
     }

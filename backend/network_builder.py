@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+import base64
 import io
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -35,7 +37,7 @@ TEXT_EXTENSIONS = {
     ".log",
 }
 DEFAULT_PLANNER_ENDPOINT = (
-    "https://aryan-cs--deepseek-r1-32b-openai-server.modal.run/v1/chat/completions"
+    "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server.modal.run/v1/chat/completions"
 )
 DEFAULT_PLANNER_MODEL_ID = "deepseek-r1"
 PLANNER_CONTEXT_MAX_TOTAL_CHARS = 26000
@@ -105,14 +107,29 @@ class AvatarSessionStartRequest(BaseModel):
 
 class AvatarSessionStartResponse(BaseModel):
     agent_id: str
+    mode: str
     avatar_id: str
     avatar_name: str
     default_voice_id: str
     default_voice_name: str
     livekit_url: str
     livekit_client_token: str
+    livekit_agent_token: str | None = None
     session_id: str
     system_prompt: str
+
+
+class AvatarTurnRequest(BaseModel):
+    agent_id: str = Field(..., min_length=1)
+    user_text: str = Field(..., min_length=1)
+
+
+class AvatarTurnResponse(BaseModel):
+    agent_id: str
+    assistant_text: str
+    voice_id: str
+    audio_mime_type: str
+    audio_base64: str
 
 
 app = FastAPI(
@@ -184,13 +201,6 @@ def _normalize_record(record: dict[str, Any], fieldnames: list[str]) -> dict[str
         raw_value = record.get(field, "")
         normalized[field] = str(raw_value).strip() if raw_value is not None else ""
     return normalized
-
-
-def _is_repeated_header_row(row: dict[str, str], fieldnames: list[str]) -> bool:
-    for name in fieldnames:
-        if row.get(name, "").strip().lower() != name.strip().lower():
-            return False
-    return True
 
 
 def _parse_connections(raw_connections: str) -> list[str]:
@@ -371,6 +381,43 @@ def _liveavatar_context_id() -> str:
     return os.getenv("LIVEAVATAR_CONTEXT_ID", "").strip()
 
 
+def _liveavatar_mode() -> str:
+    raw = os.getenv("LIVEAVATAR_MODE", "FULL").strip().upper()
+    if raw == "LITE":
+        return "CUSTOM"
+    if raw in {"FULL", "CUSTOM"}:
+        return raw
+    return "FULL"
+
+
+def _liveavatar_is_sandbox() -> bool:
+    return os.getenv("LIVEAVATAR_SANDBOX", "0").strip().lower() in {"1", "true", "yes"}
+
+
+def _liveavatar_context_strategy() -> str:
+    # dynamic: create context per session; static: use LIVEAVATAR_CONTEXT_ID; auto: try dynamic then static fallback
+    raw = os.getenv("LIVEAVATAR_CONTEXT_STRATEGY", "dynamic").strip().lower()
+    if raw in {"dynamic", "static", "auto"}:
+        return raw
+    return "dynamic"
+
+
+def _liveavatar_opening_text_default() -> str:
+    return os.getenv("LIVEAVATAR_OPENING_TEXT", "Hi, how can I help today?").strip()
+
+
+def _elevenlabs_api_key() -> str:
+    return os.getenv("ELEVENLABS_API_KEY", "").strip()
+
+
+def _elevenlabs_model_id() -> str:
+    return os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2").strip()
+
+
+def _elevenlabs_output_format() -> str:
+    return os.getenv("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128").strip()
+
+
 def _load_agents_by_id() -> dict[str, dict[str, str]]:
     agents_path = _agents_csv_path()
     if not agents_path.exists():
@@ -417,7 +464,11 @@ def _liveavatar_request(
         raise ValueError("LIVEAVATAR_API_KEY is not configured.")
 
     url = urllib.parse.urljoin(f"{base_url}/", path.lstrip("/"))
-    headers = {"accept": "application/json"}
+    headers = {
+        "accept": "application/json",
+        # Some edge/WAF setups block default urllib user-agent strings.
+        "User-Agent": "matrix-backend/0.1 (+https://api.liveavatar.com)",
+    }
     body = None
     if payload is not None:
         headers["content-type"] = "application/json"
@@ -434,9 +485,9 @@ def _liveavatar_request(
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
-        raise ValueError(f"LiveAvatar API error {exc.code}: {detail[:260]}") from exc
+        raise ValueError(f"LiveAvatar API error {exc.code} for {url}: {detail[:320]}") from exc
     except urllib.error.URLError as exc:
-        raise ValueError(f"LiveAvatar API request failed: {exc.reason}") from exc
+        raise ValueError(f"LiveAvatar API request failed for {url}: {exc.reason}") from exc
 
     try:
         parsed = json.loads(raw)
@@ -448,6 +499,149 @@ def _liveavatar_request(
             f"LiveAvatar API returned code={parsed.get('code')}: {parsed.get('message', 'unknown error')}"
         )
     return parsed
+
+
+def _extract_context_id(parsed: dict[str, Any]) -> str:
+    data = parsed.get("data", {}) if isinstance(parsed, dict) else {}
+    for key in ("context_id", "id"):
+        value = str(data.get(key, "")).strip() if isinstance(data, dict) else ""
+        if value:
+            return value
+    return ""
+
+
+def _liveavatar_create_context(agent_id: str, system_prompt: str, opening_text: str) -> str:
+    prompt_text = (system_prompt or "").strip()
+    if not prompt_text:
+        raise ValueError(f"agent_id={agent_id} has empty system_prompt; cannot create dynamic context.")
+    opening = (opening_text or "").strip() or _liveavatar_opening_text_default()
+
+    name = f"agent-{agent_id}-{int(time.time())}"
+    candidate_payloads: list[dict[str, Any]] = [
+        # LiveAvatar contexts require `opening_text`; keep it present in every attempt.
+        {"name": name, "opening_text": opening, "system_prompt": prompt_text},
+        {"name": name, "opening_text": opening, "prompt": prompt_text},
+        {"name": name, "opening_text": opening, "content": prompt_text},
+        {"name": name, "opening_text": opening, "context": prompt_text},
+        {"name": name, "opening_text": opening},
+    ]
+
+    last_error: Exception | None = None
+    for payload in candidate_payloads:
+        try:
+            result = _liveavatar_request("POST", "/contexts", payload=payload)
+            context_id = _extract_context_id(result)
+            if context_id:
+                return context_id
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        raise ValueError(f"Failed to create LiveAvatar context dynamically: {last_error}") from last_error
+    raise ValueError("Failed to create LiveAvatar context dynamically: unknown response shape.")
+
+
+def _resolve_context_id_for_agent(agent_id: str, agent: dict[str, str]) -> str:
+    strategy = _liveavatar_context_strategy()
+    static_context_id = _liveavatar_context_id()
+
+    if strategy == "static":
+        if not static_context_id:
+            raise ValueError("LIVEAVATAR_CONTEXT_ID is required when LIVEAVATAR_CONTEXT_STRATEGY=static.")
+        return static_context_id
+
+    # dynamic / auto: create context from system prompt
+    try:
+        full_name = (agent.get("full_name") or "").strip()
+        if full_name:
+            opening_text = f"Hi, I'm {full_name}. How can I help today?"
+        else:
+            opening_text = _liveavatar_opening_text_default()
+        return _liveavatar_create_context(
+            agent_id=agent_id,
+            system_prompt=agent.get("system_prompt", ""),
+            opening_text=opening_text,
+        )
+    except Exception:
+        if strategy == "auto" and static_context_id:
+            return static_context_id
+        raise
+
+
+def _planner_chat(messages: list[dict[str, str]], *, temperature: float = 0.2, max_tokens: int = 500) -> str:
+    planner_endpoint = _planner_endpoint()
+    if not planner_endpoint:
+        raise ValueError("Planner endpoint is not configured.")
+
+    payload = {
+        "model": _planner_model_id(),
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    }
+
+    request = urllib.request.Request(
+        planner_endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_planner_headers(),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise ValueError(f"Planner endpoint responded {exc.code}: {detail[:260]}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"Planner endpoint request failed: {exc.reason}") from exc
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Planner response was not valid JSON.") from exc
+
+    content = parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Planner returned empty content.")
+    return content.strip()
+
+
+def _elevenlabs_tts(voice_id: str, text: str) -> bytes:
+    api_key = _elevenlabs_api_key()
+    if not api_key:
+        raise ValueError("ELEVENLABS_API_KEY is not configured.")
+    if not voice_id.strip():
+        raise ValueError("voice_id is required for ElevenLabs TTS.")
+
+    output_format = _elevenlabs_output_format()
+    endpoint = (
+        f"https://api.elevenlabs.io/v1/text-to-speech/{urllib.parse.quote(voice_id)}"
+        f"?output_format={urllib.parse.quote(output_format)}"
+    )
+    payload = {
+        "text": text,
+        "model_id": _elevenlabs_model_id(),
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "accept": "audio/mpeg",
+            "content-type": "application/json",
+            "xi-api-key": api_key,
+            "User-Agent": "matrix-backend/0.1 (+https://elevenlabs.io)",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise ValueError(f"ElevenLabs API error {exc.code}: {detail[:260]}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"ElevenLabs API request failed: {exc.reason}") from exc
 
 
 def _parse_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
@@ -467,8 +661,6 @@ def _parse_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
         for line_index, record in enumerate(reader, start=2):
             normalized = _normalize_record(record, fieldnames)
             if not any(value for value in normalized.values()):
-                continue
-            if _is_repeated_header_row(normalized, fieldnames):
                 continue
 
             agent_id = normalized.get("agent_id", "")
@@ -697,6 +889,8 @@ async def planner_context_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
 @app.get("/api/avatar/agents", response_model=AvatarAgentsResponse)
 async def avatar_agents() -> AvatarAgentsResponse:
     try:
@@ -730,9 +924,8 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
     if not agent_id:
         raise HTTPException(status_code=400, detail="agent_id is required.")
 
-    context_id = _liveavatar_context_id()
-    if not context_id:
-        raise HTTPException(status_code=500, detail="LIVEAVATAR_CONTEXT_ID is not configured.")
+    mode = _liveavatar_mode()
+    context_id = ""
 
     try:
         agents_by_id = _load_agents_by_id()
@@ -756,15 +949,22 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
         raise HTTPException(status_code=400, detail=f"Missing default_voice_id for agent_id: {agent_id}")
 
     try:
-        token_payload = {
+        if mode == "FULL":
+            context_id = _resolve_context_id_for_agent(agent_id=agent_id, agent=agent)
+            if not context_id:
+                raise ValueError(f"No context_id resolved for FULL mode (agent_id={agent_id}).")
+
+        token_payload: dict[str, Any] = {
             "avatar_id": avatar_id,
-            "mode": "FULL",
-            "avatar_persona": {
+            "mode": mode,
+            "is_sandbox": _liveavatar_is_sandbox(),
+        }
+        if mode == "FULL":
+            token_payload["avatar_persona"] = {
                 "voice_id": voice_id,
                 "context_id": context_id,
                 "language": "en",
-            },
-        }
+            }
         token_result = _liveavatar_request("POST", "/sessions/token", payload=token_payload)
         session_token = (
             token_result.get("data", {}).get("session_token", "") if isinstance(token_result, dict) else ""
@@ -778,18 +978,76 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
     start_data = start_result.get("data", {}) if isinstance(start_result, dict) else {}
     livekit_url = str(start_data.get("livekit_url", "")).strip()
     livekit_client_token = str(start_data.get("livekit_client_token", "")).strip()
+    livekit_agent_token = str(start_data.get("livekit_agent_token") or "").strip() or None
     session_id = str(start_data.get("session_id", "")).strip()
     if not livekit_url or not livekit_client_token or not session_id:
         raise HTTPException(status_code=502, detail="LiveAvatar start response missing LiveKit credentials.")
 
     return AvatarSessionStartResponse(
         agent_id=agent_id,
+        mode=mode,
         avatar_id=avatar_id,
         avatar_name=str(mapped.get("avatar_name", "")).strip(),
         default_voice_id=voice_id,
         default_voice_name=str(mapped.get("default_voice_name", "")).strip(),
         livekit_url=livekit_url,
         livekit_client_token=livekit_client_token,
+        livekit_agent_token=livekit_agent_token,
         session_id=session_id,
         system_prompt=agent.get("system_prompt", ""),
+    )
+
+
+@app.post("/api/avatar/turn", response_model=AvatarTurnResponse)
+async def avatar_turn(payload: AvatarTurnRequest) -> AvatarTurnResponse:
+    agent_id = payload.agent_id.strip()
+    user_text = payload.user_text.strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id is required.")
+    if not user_text:
+        raise HTTPException(status_code=400, detail="user_text is required.")
+
+    try:
+        agents_by_id = _load_agents_by_id()
+        mapping = _load_agent_avatar_mapping()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    agent = agents_by_id.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
+
+    mapped = mapping.get(agent_id)
+    if not isinstance(mapped, dict):
+        raise HTTPException(status_code=404, detail=f"No avatar mapping found for agent_id: {agent_id}")
+    voice_id = str(mapped.get("default_voice_id", "")).strip()
+    if not voice_id:
+        raise HTTPException(status_code=400, detail=f"Missing default_voice_id for agent_id: {agent_id}")
+
+    try:
+        assistant_text = _planner_chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are roleplaying the specific fictional citizen profile below. "
+                        "Stay in character and respond conversationally in 2-4 sentences.\n\n"
+                        f"{agent.get('system_prompt', '')}"
+                    ),
+                },
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.3,
+            max_tokens=260,
+        )
+        audio_bytes = _elevenlabs_tts(voice_id=voice_id, text=assistant_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return AvatarTurnResponse(
+        agent_id=agent_id,
+        assistant_text=assistant_text,
+        voice_id=voice_id,
+        audio_mime_type="audio/mpeg",
+        audio_base64=base64.b64encode(audio_bytes).decode("ascii"),
     )
