@@ -2,18 +2,6 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
-<<<<<<< HEAD
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    proxy: {
-      "/api": {
-        target: "http://127.0.0.1:8000",
-        changeOrigin: true
-      }
-    }
-  }
-=======
 const DEFAULT_PLANNER_MODEL_ENDPOINT = "";
 const DEFAULT_PLANNER_MODEL_ID = "deepseek-r1";
 const DEFAULT_PLANNER_PROXY_PATH = "/api/planner/chat";
@@ -355,7 +343,25 @@ export default defineConfig(({ mode }) => {
     ...loadEnv(mode, process.cwd(), ""),
   };
   return {
-    plugins: [react(), plannerLoggingProxy(env), exaProxy(env)]
+    plugins: [react(), plannerLoggingProxy(env), exaProxy(env)],
+    server: {
+      proxy: {
+        "/api": {
+          target: env.VITE_BACKEND_PROXY_TARGET || "http://127.0.0.1:8000",
+          changeOrigin: true,
+          ws: true,
+          bypass(req) {
+            const requestUrl = req.url || "";
+            if (
+              requestUrl.startsWith("/api/planner/chat") ||
+              requestUrl.startsWith("/api/exa/search")
+            ) {
+              return requestUrl;
+            }
+            return undefined;
+          }
+        }
+      }
+    }
   };
->>>>>>> origin/master
 });

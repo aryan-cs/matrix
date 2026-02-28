@@ -1,10 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import DotWaveBackground from "./components/DotWaveBackground";
-<<<<<<< HEAD
-import AgentLiveAvatarCard from "./components/AgentLiveAvatarCard";
-=======
+import GraphCirclePanel from "./components/GraphCirclePanel";
 import addIcon from "../assets/icons/add.svg";
->>>>>>> origin/master
 import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
 import downloadIcon from "../assets/icons/download.svg";
@@ -33,14 +30,19 @@ const HOLD_AT_FULL_MS = 1500;
 const HOLD_BETWEEN_PROMPTS_MS = 360;
 const CHIP_REMOVE_ANIMATION_MS = 520;
 const CHIP_REPOSITION_ANIMATION_MS = 620;
-<<<<<<< HEAD
-const FIRST_CHAT_REVEAL_DELAY_MS = 620;
-=======
 const CHAT_ENTER_TRANSITION_MS = 620;
 const CHAT_INITIAL_MESSAGE_STAGGER_MS = 500;
 const COMPOSER_DOCK_ANIMATION_MS = 680;
+const ARTIFACT_MODAL_EXIT_MS = 220;
 const THINKING_PLACEHOLDER_TEXT = "Thinking...";
 const EXA_SUCCESS_PLACEHOLDER_TEXT = "Searched the web with Exa.";
+const STREAM_REVEAL_MIN_CHARS = 2;
+const STREAM_REVEAL_MAX_CHARS = 20;
+const STREAM_REVEAL_RATIO = 0.24;
+const GRAPH_PANEL_DEFAULT_WIDTH = 360;
+const GRAPH_PANEL_MIN_WIDTH = 280;
+const GRAPH_PANEL_MAX_WIDTH = 760;
+const GRAPH_PANEL_MIN_MAIN_WIDTH = 460;
 const DEFAULT_PLANNER_SYSTEM_PROMPT =
   "You are a simulation planner assistant. Use provided prompt + context files to draft planning assumptions and key demographic factors.";
 const PLANNER_SYSTEM_PROMPT = (plannerSystemPromptRaw || "").trim() || DEFAULT_PLANNER_SYSTEM_PROMPT;
@@ -79,7 +81,6 @@ const PLANNER_CONTEXT_MAX_FILE_CHARS = parsePositiveInt(
   import.meta.env.VITE_PLANNER_CONTEXT_MAX_FILE_CHARS,
   DEFAULT_CONTEXT_MAX_FILE_CHARS
 );
->>>>>>> origin/master
 const TEXT_PREVIEW_EXTENSIONS = new Set([
   "txt",
   "md",
@@ -116,14 +117,6 @@ const ALLOWED_EXTENSIONS = new Set([
 ]);
 const MAX_TOTAL_FILES = 200;
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
-<<<<<<< HEAD
-const PLANNER_CONTEXT_ENDPOINT = import.meta.env.VITE_PLANNER_CONTEXT_ENDPOINT || "/api/planner/context";
-const PLANNER_CONTEXT_STREAM_ENDPOINT =
-  import.meta.env.VITE_PLANNER_CONTEXT_STREAM_ENDPOINT || "/api/planner/context/stream";
-const NETWORK_BUILDER_ENDPOINT =
-  import.meta.env.VITE_NETWORK_BUILDER_ENDPOINT || "/api/graph/from-csv-text";
-=======
->>>>>>> origin/master
 
 function extensionFor(name) {
   const split = name.split(".");
@@ -161,8 +154,6 @@ function fileNameFromPath(path) {
   return segments.at(-1) || path;
 }
 
-<<<<<<< HEAD
-=======
 function createRuntimeId(prefix) {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return `${prefix}-${crypto.randomUUID()}`;
@@ -502,7 +493,6 @@ function looksLikeCsvLine(line) {
   return normalized.length > 0 && normalized.includes(",") && !normalized.startsWith("```");
 }
 
->>>>>>> origin/master
 function parseCsvLine(line) {
   const text = String(line || "");
   const fields = [];
@@ -511,10 +501,7 @@ function parseCsvLine(line) {
 
   for (let i = 0; i < text.length; i += 1) {
     const char = text[i];
-<<<<<<< HEAD
-=======
 
->>>>>>> origin/master
     if (char === "\"") {
       if (inQuotes && text[i + 1] === "\"") {
         current += "\"";
@@ -538,203 +525,48 @@ function parseCsvLine(line) {
   return fields;
 }
 
-<<<<<<< HEAD
-function textAfterFinalThinkTag(rawText) {
-  const normalized = String(rawText || "").replace(/\r\n/g, "\n");
-  const closeTagRegex = /<\/think\s*>/gi;
-  let lastCloseEnd = -1;
-  let match = closeTagRegex.exec(normalized);
-  while (match) {
-    lastCloseEnd = closeTagRegex.lastIndex;
-    match = closeTagRegex.exec(normalized);
-  }
-  if (lastCloseEnd === -1) return normalized.trim();
-  return normalized.slice(lastCloseEnd).trim();
+function normalizeCsvToken(value) {
+  return String(value ?? "").trim().toLowerCase();
 }
 
-function splitThinkContent(rawText, assumeThinking = false) {
-  const text = String(rawText ?? "");
-  const openMatch = /<think\s*>/i.exec(text);
-  const closeMatch = /<\/think\s*>/i.exec(text);
-
-  if (closeMatch && (!openMatch || closeMatch.index < openMatch.index)) {
-    return {
-      thinkingText: text.slice(0, closeMatch.index),
-      finalText: text.slice(closeMatch.index + closeMatch[0].length)
-    };
-  }
-
-  if (openMatch && closeMatch && closeMatch.index > openMatch.index) {
-    const beforeOpen = text.slice(0, openMatch.index);
-    const insideThink = text.slice(openMatch.index + openMatch[0].length, closeMatch.index);
-    return {
-      thinkingText: `${beforeOpen}${insideThink}`,
-      finalText: text.slice(closeMatch.index + closeMatch[0].length)
-    };
-  }
-
-  if (openMatch && !closeMatch) {
-    return {
-      thinkingText: `${text.slice(0, openMatch.index)}${text.slice(
-        openMatch.index + openMatch[0].length
-      )}`,
-      finalText: ""
-    };
-  }
-
-  if (assumeThinking) {
-    return {
-      thinkingText: text,
-      finalText: ""
-    };
-  }
-
-  return {
-    thinkingText: "",
-    finalText: text
-  };
-}
-
-function extractCsvPayloadFromPlannerText(rawText) {
-  const postThinkText = textAfterFinalThinkTag(rawText);
-  if (!postThinkText) return "";
-
-  const fencedMatch = postThinkText.match(/```(?:csv)?\s*\n([\s\S]*?)```/i);
-  const candidate = (fencedMatch ? fencedMatch[1] : postThinkText).trim();
-  if (!candidate) return "";
-
-  const lines = candidate.replace(/\r\n/g, "\n").split("\n");
-  let headerIndex = -1;
-  let headerFieldCount = 0;
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i].trim();
-    if (!line || !line.includes(",")) continue;
-    const lowered = line.toLowerCase();
-    if (lowered.includes("agent_id") && lowered.includes("connections") && lowered.includes("system_prompt")) {
-      headerIndex = i;
-      headerFieldCount = parseCsvLine(line).length;
-      break;
+function isRepeatedHeaderRow(values, normalizedHeaders) {
+  if (!Array.isArray(values) || values.length < normalizedHeaders.length) return false;
+  for (let i = 0; i < normalizedHeaders.length; i += 1) {
+    if (normalizeCsvToken(values[i]) !== normalizedHeaders[i]) {
+      return false;
     }
   }
+  return true;
+}
 
-  if (headerIndex === -1 || headerFieldCount < 2) return "";
-
-  const csvLines = [lines[headerIndex].trim()];
-  for (let i = headerIndex + 1; i < lines.length; i += 1) {
-    const line = lines[i].trim();
-    if (!line || !line.includes(",")) break;
-    if (parseCsvLine(line).length !== headerFieldCount) break;
-    csvLines.push(line);
+function alignCsvRowValues(values, headerCount) {
+  if (!Array.isArray(values) || headerCount <= 0) return null;
+  if (values.length === headerCount) return values;
+  if (values.length > headerCount) {
+    // Recover unquoted commas by collapsing overflow into the last column.
+    return [
+      ...values.slice(0, headerCount - 1),
+      values.slice(headerCount - 1).join(",")
+    ];
   }
-
-  return csvLines.length >= 2 ? csvLines.join("\n") : "";
+  return [...values, ...Array(headerCount - values.length).fill("")];
 }
 
-function compactSnippet(text, maxChars = 180) {
-  const normalized = String(text || "").replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, maxChars - 1)}...`;
+function escapeCsvValue(value) {
+  const text = String(value ?? "");
+  if (!/[",\n]/.test(text)) return text;
+  return `"${text.replace(/"/g, "\"\"")}"`;
 }
 
-function createLocalMessageId(prefix = "msg") {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return `${prefix}-${crypto.randomUUID()}`;
-  }
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-function plannerTextFromBody(body) {
-  if (!body) return "";
-  if (typeof body === "string") return body;
-  if (typeof body.output_text === "string") return body.output_text;
-  if (typeof body.completion === "string") return body.completion;
-  const choiceContent = body?.choices?.[0]?.message?.content;
-  if (typeof choiceContent === "string") return choiceContent;
-  return "";
-}
-
-function delay(ms) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
-}
-
-function escapeHtml(text) {
-  return String(text ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll("\"", "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function inlineMarkdownToHtml(text) {
-  let html = escapeHtml(text);
-  const codeTokens = [];
-
-  html = html.replace(/`([^`\n]+)`/g, (_, code) => {
-    const token = `@@CODE_TOKEN_${codeTokens.length}@@`;
-    codeTokens.push(`<code>${code}</code>`);
-    return token;
-  });
-
-  html = html.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noreferrer">$1</a>'
+function serializeCsvRecords(headers, rows) {
+  if (!Array.isArray(headers) || headers.length === 0) return "";
+  const headerLine = headers.map((header) => escapeCsvValue(header)).join(",");
+  const bodyLines = (rows || []).map((row) =>
+    headers.map((header) => escapeCsvValue(row?.[header] ?? "")).join(",")
   );
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
-  html = html.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-  html = html.replace(/_([^_\n]+)_/g, "<em>$1</em>");
-  html = html.replace(/~~([^~]+)~~/g, "<del>$1</del>");
-
-  codeTokens.forEach((token, index) => {
-    html = html.replace(`@@CODE_TOKEN_${index}@@`, token);
-  });
-
-  return html;
+  return [headerLine, ...bodyLines].join("\n").trim();
 }
 
-function markdownToHtml(text) {
-  const input = String(text ?? "").replace(/\r\n/g, "\n");
-  if (!input.trim()) return "";
-
-  const lines = input.split("\n");
-  const blocks = [];
-  let index = 0;
-
-  const isSpecialStart = (line) =>
-    /^#{1,6}\s+/.test(line) ||
-    /^[-*+]\s+/.test(line) ||
-    /^\d+\.\s+/.test(line) ||
-    /^(```)/.test(line) ||
-    /^(-{3,}|\*{3,}|_{3,})\s*$/.test(line);
-
-  while (index < lines.length) {
-    const rawLine = lines[index];
-    const line = rawLine.trim();
-
-    if (!line) {
-      index += 1;
-      continue;
-    }
-
-    if (line.startsWith("```")) {
-      const lang = line.slice(3).trim();
-      index += 1;
-      const codeLines = [];
-      while (index < lines.length && !lines[index].trim().startsWith("```")) {
-        codeLines.push(lines[index]);
-        index += 1;
-      }
-      if (index < lines.length) {
-        index += 1;
-      }
-      const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : "";
-      blocks.push(
-        `<pre><code${langClass}>${escapeHtml(codeLines.join("\n"))}</code></pre>`
-=======
 function extractCsvPayload(text) {
   const postThinkSection = stripThinkSections(text);
   if (!postThinkSection) return "";
@@ -798,17 +630,38 @@ function parseCsvRecords(csvText) {
   if (rawLines.length < 2) return { headers: [], rows: [] };
 
   const headers = parseCsvLine(rawLines[0]).map((header) => header.trim());
+  if (headers.length < 2) return { headers: [], rows: [] };
+  const normalizedHeaders = headers.map((header) => normalizeCsvToken(header));
+  const idHeader =
+    headers.find((header) => normalizeCsvToken(header) === "agent_id") ||
+    headers.find((header) => normalizeCsvToken(header) === "id") ||
+    "";
+  const seenAgentIds = new Set();
   const rows = [];
 
   for (let i = 1; i < rawLines.length; i += 1) {
-    const values = parseCsvLine(rawLines[i]);
-    if (values.length === 0) continue;
+    const parsedValues = parseCsvLine(rawLines[i]).map((value) => String(value ?? "").trim());
+    const values = alignCsvRowValues(parsedValues, headers.length);
+    if (!values || !values.some((value) => value.length > 0)) continue;
+    if (isRepeatedHeaderRow(values, normalizedHeaders)) continue;
 
     const row = {};
     for (let j = 0; j < headers.length; j += 1) {
       const key = headers[j] || `column_${j}`;
       row[key] = String(values[j] || "").trim();
     }
+
+    if (idHeader) {
+      const rawAgentId = String(row[idHeader] || "").trim();
+      if (!rawAgentId || normalizeCsvToken(rawAgentId) === normalizeCsvToken(idHeader)) {
+        continue;
+      }
+      if (seenAgentIds.has(rawAgentId)) {
+        continue;
+      }
+      seenAgentIds.add(rawAgentId);
+    }
+
     rows.push(row);
   }
 
@@ -894,11 +747,12 @@ function summarizeCsvArtifact(csvText) {
 
   const { headers, rows } = parseCsvRecords(payload);
   if (headers.length === 0) return null;
+  const normalizedPayload = serializeCsvRecords(headers, rows);
   const normalizedHeaders = headers.map((header) => header.trim().toLowerCase());
 
   const headerCount = headers.length;
   const rowCount = rows.length;
-  const graph = rowCount > 0 ? buildNetworkGraphFromCsv(payload) : null;
+  const graph = rowCount > 0 ? buildNetworkGraphFromCsv(normalizedPayload) : null;
   const runIdHeader =
     headers.find((header) => header.trim().toLowerCase() === "run_id") || "";
   const runId =
@@ -915,7 +769,7 @@ function summarizeCsvArtifact(csvText) {
   if (!isLikelyCsv) return null;
 
   return {
-    payload,
+    payload: normalizedPayload,
     headerCount,
     rowCount,
     runId,
@@ -931,6 +785,28 @@ function formatCsvDownloadFilename(runId = "") {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const prefix = safeRunId || "planner-output";
   return `${prefix}-${stamp}.csv`;
+}
+
+function extractRequestedSampleCountFromPrompt(promptText) {
+  const text = String(promptText || "");
+  if (!text) return null;
+
+  const patterns = [
+    /\bn\s*=\s*(\d{1,4})\b/i,
+    /\bwith\s+(\d{1,4})\s+(?:representatives?|agents?|samples?)\b/i,
+    /\b(\d{1,4})\s+(?:representatives?|agents?|samples?)\b/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const count = Number.parseInt(match[1], 10);
+    if (Number.isFinite(count) && count > 0) {
+      return count;
+    }
+  }
+
+  return null;
 }
 
 function downloadCsvArtifact(csvPayload, runId = "") {
@@ -960,24 +836,16 @@ function downloadCsvArtifact(csvPayload, runId = "") {
 function CsvArtifactCard({
   summary,
   pending = false,
+  totalCount = null,
   previewText = "",
   onOpen = null,
   onDownload = null,
   downloadQueued = false
 }) {
-  const rowLabel =
-    summary && summary.rowCount > 0
-      ? `${summary.rowCount} agent${summary.rowCount === 1 ? "" : "s"}`
-      : "Generating rows";
-  const columnLabel =
-    summary && summary.headerCount > 0
-      ? `${summary.headerCount} field${summary.headerCount === 1 ? "" : "s"}`
-      : "Inferring schema";
-  const edgeCount = summary?.graph?.stats?.edge_count;
-  const edgeLabel =
-    typeof edgeCount === "number"
-      ? `${edgeCount} connection${edgeCount === 1 ? "" : "s"}`
-      : "Building graph";
+  const resolvedTotalCount =
+    Number.isFinite(totalCount) && totalCount > 0 ? Math.max(1, Math.round(totalCount)) : null;
+  const generatedCount = summary?.rowCount ?? 0;
+  const progressLabel = resolvedTotalCount ? `${generatedCount}/${resolvedTotalCount} samples generated` : "";
   const isInteractive = typeof onOpen === "function";
   const canDownload = typeof onDownload === "function";
   const downloadLabel = pending
@@ -1002,10 +870,7 @@ function CsvArtifactCard({
         <div className="csv-artifact-badge">CSV</div>
         <div className="csv-artifact-copy">
           <p className="csv-artifact-title">Generated Agent Data</p>
-          <p className="csv-artifact-meta">
-            {rowLabel} • {columnLabel} • {edgeLabel}
-            {summary?.runId ? ` • ${summary.runId}` : ""}
-          </p>
+          {progressLabel ? <p className="csv-artifact-meta">{progressLabel}</p> : null}
         </div>
       </button>
       <button
@@ -1142,6 +1007,10 @@ function renderMessageContent(message, options = {}) {
   }
 
   const messageText = String(message.content || "");
+  if (message.uiType === "status-tooltip") {
+    return <p className="chat-status-tooltip">{messageText}</p>;
+  }
+
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
     return (
       <>
@@ -1167,6 +1036,10 @@ function renderMessageContent(message, options = {}) {
   const artifactPreviewText = (csvSummary?.payload || extractCsvPayload(primaryAnswerText) || "").trim();
   const downloadQueued =
     typeof isArtifactDownloadQueued === "function" ? isArtifactDownloadQueued(message.id) : false;
+  const requestedSampleCount =
+    Number.isFinite(message.requestedSampleCount) && message.requestedSampleCount > 0
+      ? message.requestedSampleCount
+      : null;
 
   if (!hasThinkText) {
     if (showCsvArtifact) {
@@ -1174,6 +1047,7 @@ function renderMessageContent(message, options = {}) {
         <CsvArtifactCard
           summary={csvSummary}
           pending={isCsvPending}
+          totalCount={requestedSampleCount}
           previewText={artifactPreviewText}
           onOpen={
             onOpenArtifact
@@ -1210,6 +1084,7 @@ function renderMessageContent(message, options = {}) {
           <CsvArtifactCard
             summary={csvSummary}
             pending={isCsvPending}
+            totalCount={requestedSampleCount}
             previewText={artifactPreviewText}
             onOpen={
               onOpenArtifact
@@ -1242,6 +1117,7 @@ function renderMessageContent(message, options = {}) {
 
 function messageShouldRenderCsvArtifact(message) {
   if (!message || message.role !== "assistant") return false;
+  if (message.uiType === "status-tooltip") return false;
 
   const messageText = String(message.content || "");
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
@@ -1352,66 +1228,10 @@ async function buildPlannerContextBlock(files) {
     if (!isTextContextFile(file)) {
       sections.push(
         `File: ${descriptor}\nContent: [Binary or non-text file attached; not inlined by browser client.]`
->>>>>>> origin/master
       );
       continue;
     }
 
-<<<<<<< HEAD
-    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-    if (headingMatch) {
-      const level = headingMatch[1].length;
-      blocks.push(`<h${level}>${inlineMarkdownToHtml(headingMatch[2])}</h${level}>`);
-      index += 1;
-      continue;
-    }
-
-    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
-      blocks.push("<hr />");
-      index += 1;
-      continue;
-    }
-
-    if (/^[-*+]\s+/.test(line)) {
-      const items = [];
-      while (index < lines.length) {
-        const candidate = lines[index].trim();
-        const match = candidate.match(/^[-*+]\s+(.+)$/);
-        if (!match) break;
-        items.push(`<li>${inlineMarkdownToHtml(match[1])}</li>`);
-        index += 1;
-      }
-      blocks.push(`<ul>${items.join("")}</ul>`);
-      continue;
-    }
-
-    if (/^\d+\.\s+/.test(line)) {
-      const items = [];
-      while (index < lines.length) {
-        const candidate = lines[index].trim();
-        const match = candidate.match(/^\d+\.\s+(.+)$/);
-        if (!match) break;
-        items.push(`<li>${inlineMarkdownToHtml(match[1])}</li>`);
-        index += 1;
-      }
-      blocks.push(`<ol>${items.join("")}</ol>`);
-      continue;
-    }
-
-    const paragraphLines = [];
-    while (index < lines.length) {
-      const candidateRaw = lines[index];
-      const candidate = candidateRaw.trim();
-      if (!candidate) break;
-      if (paragraphLines.length > 0 && isSpecialStart(candidate)) break;
-      paragraphLines.push(inlineMarkdownToHtml(candidateRaw));
-      index += 1;
-    }
-    blocks.push(`<p>${paragraphLines.join("<br />")}</p>`);
-  }
-
-  return blocks.join("");
-=======
     if (remainingChars <= 0) {
       sections.push(`File: ${descriptor}\nContent: [Omitted due to context size budget.]`);
       continue;
@@ -1436,60 +1256,6 @@ async function buildPlannerContextBlock(files) {
 // ── Clarifying questions ────────────────────────────────────────────────────
 
 const CLARIFY_TIMEOUT_MS = 25000;
-
-async function fetchClarifyingQuestions(promptText) {
-  const url = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
-  const reqUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : url;
-  if (!reqUrl) return null;
-
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), CLARIFY_TIMEOUT_MS);
-
-  try {
-    const resp = await fetch(reqUrl, {
-      signal: controller.signal,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(!USE_PLANNER_DEV_PROXY && PLANNER_API_KEY
-          ? { Authorization: `Bearer ${PLANNER_API_KEY}` }
-          : {})
-      },
-      body: JSON.stringify({
-        model: PLANNER_MODEL_ID,
-        temperature: 0.5,
-        stream: false,
-        max_tokens: 2000,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a helpful assistant. After any internal reasoning, you MUST end your response with a numbered list of exactly 3 clarifying questions, formatted as:\n1. [question]\n2. [question]\n3. [question]"
-          },
-          {
-            role: "user",
-            content: `Simulation request: "${promptText}"\n\nAsk 3 clarifying questions.`
-          }
-        ]
-      })
-    });
-
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const raw = data?.choices?.[0]?.message?.content || "";
-    const cleaned = stripThinkSections(raw);
-    // Extract numbered question lines — robust regardless of surrounding reasoning text
-    const questionLines = cleaned
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => /^\d+[\.\)]\s+\S/.test(l));
-    return questionLines.length > 0 ? questionLines.join("\n") : null;
-  } catch {
-    return null;
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
 
 // ── Exa search ──────────────────────────────────────────────────────────────
 
@@ -1520,15 +1286,12 @@ function formatExaContext(exaData) {
     return `[${i + 1}] ${title}\n${highlight}`;
   });
   return `\n\n[Web research via Exa — ${exaData.results.length} sources]\n${snippets.join("\n\n")}`;
->>>>>>> origin/master
 }
 
 function App() {
   const [displayTitle, setDisplayTitle] = useState(TITLE_TEXT);
   const [showSubtitle, setShowSubtitle] = useState(false);
   const [scenarioText, setScenarioText] = useState("");
-  const [chatStarted, setChatStarted] = useState(false);
-  const [messages, setMessages] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [previewTarget, setPreviewTarget] = useState(null);
   const [previewMode, setPreviewMode] = useState("none");
@@ -1536,15 +1299,16 @@ function App() {
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
   const [artifactModal, setArtifactModal] = useState(null);
+  const [isArtifactModalClosing, setIsArtifactModalClosing] = useState(false);
   const [queuedArtifactDownloadIds, setQueuedArtifactDownloadIds] = useState(() => new Set());
   const [isSubmitting, setIsSubmitting] = useState(false);
-<<<<<<< HEAD
-  const [expandedThinkingIds, setExpandedThinkingIds] = useState(() => new Set());
-=======
   const [isChatMode, setIsChatMode] = useState(false);
   const [isHeroCompacted, setIsHeroCompacted] = useState(false);
+  const [isGraphPanelOpen, setIsGraphPanelOpen] = useState(false);
+  const [graphPanelGraph, setGraphPanelGraph] = useState(null);
+  const [graphPanelWidth, setGraphPanelWidth] = useState(GRAPH_PANEL_DEFAULT_WIDTH);
+  const [isGraphPanelResizing, setIsGraphPanelResizing] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
->>>>>>> origin/master
   const [placeholderText, setPlaceholderText] = useState(
     examplePrompts[0].startsWith(SHARED_PREFIX) ? SHARED_PREFIX : ""
   );
@@ -1559,22 +1323,31 @@ function App() {
   const heroCopyRef = useRef(null);
   const contextFilesRef = useRef(contextFiles);
   const removeTimersRef = useRef(new Map());
+  const artifactModalCloseTimerRef = useRef(0);
   const contextChipRefs = useRef(new Map());
   const previousChipPositionsRef = useRef(new Map());
-<<<<<<< HEAD
-  const chatScrollRef = useRef(null);
-  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
-=======
   const composerStartRectRef = useRef(null);
   const wasHeroCompactedRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
->>>>>>> origin/master
+  const graphPanelResizeRef = useRef({
+    active: false,
+    startX: 0,
+    startWidth: GRAPH_PANEL_DEFAULT_WIDTH
+  });
 
   useEffect(() => {
     contextFilesRef.current = contextFiles;
   }, [contextFiles]);
 
   const isChatActive = isChatMode;
+  const clampGraphPanelWidth = (candidateWidth) => {
+    const viewportWidth = window.innerWidth || GRAPH_PANEL_MAX_WIDTH + GRAPH_PANEL_MIN_MAIN_WIDTH;
+    const maxWidth = Math.max(0, Math.min(GRAPH_PANEL_MAX_WIDTH, viewportWidth - GRAPH_PANEL_MIN_MAIN_WIDTH));
+    if (maxWidth <= 0) return 0;
+    const minWidth = Math.min(GRAPH_PANEL_MIN_WIDTH, maxWidth);
+    return Math.min(maxWidth, Math.max(minWidth, Math.round(candidateWidth)));
+  };
+
   const updateAutoScrollLock = () => {
     const chatNode = chatScrollRef.current;
     if (!chatNode) return;
@@ -1729,8 +1502,67 @@ function App() {
         window.clearTimeout(timerId);
       });
       removeTimersRef.current.clear();
+      if (artifactModalCloseTimerRef.current) {
+        window.clearTimeout(artifactModalCloseTimerRef.current);
+        artifactModalCloseTimerRef.current = 0;
+      }
     };
   }, []);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setGraphPanelWidth((previous) => clampGraphPanelWidth(previous));
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handlePointerMove = (event) => {
+      if (!graphPanelResizeRef.current.active) return;
+      const deltaX = event.clientX - graphPanelResizeRef.current.startX;
+      const nextWidth = clampGraphPanelWidth(graphPanelResizeRef.current.startWidth + deltaX);
+      setGraphPanelWidth(nextWidth);
+    };
+
+    const handlePointerStop = () => {
+      if (!graphPanelResizeRef.current.active) return;
+      graphPanelResizeRef.current.active = false;
+      setIsGraphPanelResizing(false);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerStop);
+    window.addEventListener("pointercancel", handlePointerStop);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerStop);
+      window.removeEventListener("pointercancel", handlePointerStop);
+    };
+  }, []);
+
+  const handleGraphPanelResizeStart = (event) => {
+    if (!isGraphPanelOpen || event.button !== 0) return;
+    event.preventDefault();
+    graphPanelResizeRef.current = {
+      active: true,
+      startX: event.clientX,
+      startWidth: graphPanelWidth
+    };
+    setIsGraphPanelResizing(true);
+  };
+
+  const handleGraphPanelResizeKeyDown = (event) => {
+    if (!isGraphPanelOpen) return;
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const delta = event.key === "ArrowRight" ? 18 : -18;
+    setGraphPanelWidth((previous) => clampGraphPanelWidth(previous + delta));
+  };
 
   useEffect(() => {
     if (!previewTarget) {
@@ -1825,12 +1657,25 @@ function App() {
     };
   }, [previewTarget]);
 
+  const closeArtifactModalWithAnimation = () => {
+    if (!artifactModal || isArtifactModalClosing) return;
+    setIsArtifactModalClosing(true);
+    if (artifactModalCloseTimerRef.current) {
+      window.clearTimeout(artifactModalCloseTimerRef.current);
+    }
+    artifactModalCloseTimerRef.current = window.setTimeout(() => {
+      setArtifactModal(null);
+      setIsArtifactModalClosing(false);
+      artifactModalCloseTimerRef.current = 0;
+    }, ARTIFACT_MODAL_EXIT_MS);
+  };
+
   useEffect(() => {
     if (!artifactModal) return undefined;
 
     const handleEscape = (event) => {
       if (event.key === "Escape") {
-        setArtifactModal(null);
+        closeArtifactModalWithAnimation();
       }
     };
 
@@ -1838,9 +1683,14 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleEscape);
     };
-  }, [artifactModal]);
+  }, [artifactModal, isArtifactModalClosing]);
 
   const handleOpenArtifactModal = ({ messageId, content }) => {
+    if (artifactModalCloseTimerRef.current) {
+      window.clearTimeout(artifactModalCloseTimerRef.current);
+      artifactModalCloseTimerRef.current = 0;
+    }
+    setIsArtifactModalClosing(false);
     const normalized = String(content || "").trim();
     setArtifactModal({
       messageId: messageId || "",
@@ -1982,16 +1832,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-<<<<<<< HEAD
-    if (chatStarted) {
-      if (placeholderText !== "") {
-        setPlaceholderText("");
-      }
-      return undefined;
-    }
-=======
     if (!isPlaceholderTypingActive) return undefined;
->>>>>>> origin/master
 
     const currentPrompt = examplePrompts[promptIndex];
     const retainedPrefixLength = currentPrompt.startsWith(SHARED_PREFIX) ? SHARED_PREFIX.length : 0;
@@ -2026,21 +1867,7 @@ function App() {
     return () => {
       window.clearTimeout(timer);
     };
-<<<<<<< HEAD
-  }, [isDeleting, placeholderText, promptIndex, chatStarted]);
-
-  useEffect(() => {
-    if (!autoScrollEnabled) return;
-    const node = chatScrollRef.current;
-    if (!node) return;
-    node.scrollTo({
-      top: node.scrollHeight,
-      behavior: "smooth"
-    });
-  }, [messages, autoScrollEnabled]);
-=======
   }, [isDeleting, placeholderText, promptIndex, isPlaceholderTypingActive]);
->>>>>>> origin/master
 
   const addContextFiles = (files) => {
     const incoming = Array.from(files);
@@ -2126,159 +1953,151 @@ function App() {
     removeTimersRef.current.set(fileId, timerId);
   };
 
-<<<<<<< HEAD
-  const updateAssistantMessage = (assistantMessageId, patch) => {
-    setMessages((prev) =>
-      prev.map((message) =>
-        message.id === assistantMessageId
-          ? {
-              ...message,
-              ...patch
-            }
-          : message
-      )
-    );
-  };
+  const streamPlannerReplyIntoMessage = async ({
+    requestUrl,
+    payload,
+    assistantTurnId,
+    timeoutMs = 0
+  }) => {
+    const controller = new AbortController();
+    const timerId =
+      timeoutMs > 0
+        ? window.setTimeout(() => {
+            controller.abort();
+          }, timeoutMs)
+        : 0;
 
-  const setThinkingPanelExpanded = (messageId, expanded) => {
-    setExpandedThinkingIds((prev) => {
-      const next = new Set(prev);
-      if (expanded) {
-        next.add(messageId);
-      } else {
-        next.delete(messageId);
-      }
-      return next;
-    });
-  };
-
-  const streamPlannerText = async ({ formData, assistantMessageId }) => {
-    const response = await fetch(PLANNER_CONTEXT_STREAM_ENDPOINT, {
-      method: "POST",
-      body: formData
-    });
-
-    if (response.status === 404) {
-      const fallbackResponse = await fetch(PLANNER_CONTEXT_ENDPOINT, {
+    let response;
+    try {
+      response = await fetch(requestUrl, {
+        signal: controller.signal,
         method: "POST",
-        body: formData
+        headers: {
+          "Content-Type": "application/json",
+          ...(!USE_PLANNER_DEV_PROXY && PLANNER_API_KEY
+            ? { Authorization: `Bearer ${PLANNER_API_KEY}` }
+            : {})
+        },
+        body: JSON.stringify(payload)
       });
-      if (!fallbackResponse.ok) {
-        throw new Error(`Planner endpoint responded ${fallbackResponse.status}`);
+    } finally {
+      if (timerId) {
+        window.clearTimeout(timerId);
       }
-      const contentType = fallbackResponse.headers.get("content-type") || "";
-      const rawText = contentType.includes("application/json")
-        ? plannerTextFromBody(await fallbackResponse.json())
-        : await fallbackResponse.text();
-      updateAssistantMessage(assistantMessageId, {
-        content: rawText || "Planner returned an empty response.",
-        thinking: false,
-        error: false
-      });
-      setThinkingPanelExpanded(assistantMessageId, false);
-      return rawText;
     }
 
     if (!response.ok) {
       let detail = "";
-      try {
-        detail = await response.text();
-      } catch {
-        detail = "";
-      }
-      throw new Error(
-        `Planner endpoint responded ${response.status}${
-          detail ? `: ${compactSnippet(detail, 240)}` : ""
-        }`
-      );
+      try { detail = await response.text(); } catch { detail = ""; }
+      throw new Error(`Planner endpoint responded ${response.status}${detail ? `: ${detail.slice(0, 220)}` : ""}`);
     }
 
-    if (!response.body) {
-      const fallbackText = await response.text();
-      updateAssistantMessage(assistantMessageId, {
-        content: fallbackText || "Planner returned an empty response.",
-        thinking: false,
-        error: false
+    const responseContentType = response.headers.get("content-type") || "";
+    let assistantText = "";
+
+    if (responseContentType.includes("text/event-stream")) {
+      let targetText = "";
+      let displayedText = "";
+      let streamDone = false;
+      let revealRafId = 0;
+      let revealResolved = false;
+      let resolveRevealCompletion;
+      const revealCompletion = new Promise((resolve) => {
+        resolveRevealCompletion = resolve;
       });
-      setThinkingPanelExpanded(assistantMessageId, false);
-      return fallbackText;
-    }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let aggregateText = "";
-    let buffer = "";
+      const emitPartial = () => {
+        setChatMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantTurnId
+              ? { ...msg, content: displayedText || THINKING_PLACEHOLDER_TEXT, pending: true }
+              : msg
+          )
+        );
+      };
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const resolveIfComplete = () => {
+        if (!streamDone) return;
+        if (displayedText.length < targetText.length) return;
+        if (revealResolved) return;
+        revealResolved = true;
+        resolveRevealCompletion();
+      };
 
-      buffer += decoder.decode(value, { stream: true });
-      let delimiterIndex = buffer.indexOf("\n\n");
-      while (delimiterIndex !== -1) {
-        const eventChunk = buffer.slice(0, delimiterIndex);
-        buffer = buffer.slice(delimiterIndex + 2);
-
-        const lines = eventChunk
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trim());
-
-        for (const line of lines) {
-          if (!line) continue;
-          if (line === "[DONE]") {
-            setThinkingPanelExpanded(assistantMessageId, false);
-            updateAssistantMessage(assistantMessageId, {
-              content: aggregateText || "Planner returned an empty response.",
-              thinking: false,
-              error: false
-            });
-            return aggregateText;
-          }
-
-          let parsed;
-          try {
-            parsed = JSON.parse(line);
-          } catch {
-            continue;
-          }
-
-          const chunkError = parsed?.error;
-          if (chunkError) {
-            throw new Error(String(chunkError));
-          }
-
-          const delta =
-            parsed?.delta ||
-            parsed?.choices?.[0]?.delta?.content ||
-            parsed?.choices?.[0]?.message?.content ||
-            "";
-
-          if (!delta) continue;
-          aggregateText += String(delta);
-          const hasThinkCloseTag = /<\/think\s*>/i.test(aggregateText);
-          setThinkingPanelExpanded(assistantMessageId, !hasThinkCloseTag);
-          updateAssistantMessage(assistantMessageId, {
-            content: aggregateText,
-            thinking: !hasThinkCloseTag,
-            error: false
-          });
+      const revealStep = () => {
+        revealRafId = 0;
+        if (displayedText.length < targetText.length) {
+          const remaining = targetText.length - displayedText.length;
+          const step = Math.min(
+            STREAM_REVEAL_MAX_CHARS,
+            Math.max(STREAM_REVEAL_MIN_CHARS, Math.ceil(remaining * STREAM_REVEAL_RATIO))
+          );
+          displayedText = targetText.slice(0, displayedText.length + step);
+          emitPartial();
+          revealRafId = window.requestAnimationFrame(revealStep);
+          return;
         }
+        resolveIfComplete();
+      };
 
-        delimiterIndex = buffer.indexOf("\n\n");
+      const scheduleReveal = () => {
+        if (revealRafId) return;
+        revealRafId = window.requestAnimationFrame(revealStep);
+      };
+
+      try {
+        assistantText = await readPlannerResponseStream(response, (partialText) => {
+          targetText = partialText || "";
+          if (targetText.length < displayedText.length) {
+            displayedText = targetText;
+            emitPartial();
+          }
+          scheduleReveal();
+        });
+
+        targetText = assistantText || targetText;
+        streamDone = true;
+        scheduleReveal();
+        await revealCompletion;
+      } finally {
+        if (revealRafId) {
+          window.cancelAnimationFrame(revealRafId);
+          revealRafId = 0;
+        }
       }
+    } else {
+      const plannerResponse = await response.json();
+      assistantText = plannerResponse?.choices?.[0]?.message?.content || "";
     }
 
-    updateAssistantMessage(assistantMessageId, {
-      content: aggregateText || "Planner returned an empty response.",
-      thinking: false,
-      error: false
-    });
-    setThinkingPanelExpanded(assistantMessageId, false);
-    return aggregateText;
-=======
+    if (!assistantText) {
+      throw new Error("Planner endpoint returned no completion content.");
+    }
+
+    const completionTimeMs = Date.now();
+    setChatMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === assistantTurnId
+          ? {
+              ...msg,
+              content: assistantText,
+              pending: false,
+              thinkingDurationSec: Math.max(
+                0.1,
+                (completionTimeMs - (typeof msg.startedAtMs === "number" ? msg.startedAtMs : completionTimeMs)) / 1000
+              )
+            }
+          : msg
+      )
+    );
+
+    if (shouldAutoScrollRef.current) {
+      window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
+    }
+
+    return assistantText;
+  };
+
   const runMainQuery = async (enrichedPrompt, filesForSubmit, assistantPendingTurnId) => {
     const plannerContext = await buildPlannerContextBlock(filesForSubmit);
     const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
@@ -2313,193 +2132,38 @@ function App() {
         }
       ]
     };
-
-    const response = await fetch(plannerRequestUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(!USE_PLANNER_DEV_PROXY && PLANNER_API_KEY
-          ? { Authorization: `Bearer ${PLANNER_API_KEY}` }
-          : {})
-      },
-      body: JSON.stringify(payload)
+    const plannerText = await streamPlannerReplyIntoMessage({
+      requestUrl: plannerRequestUrl,
+      payload,
+      assistantTurnId: assistantPendingTurnId
     });
 
-    if (!response.ok) {
-      let detail = "";
-      try { detail = await response.text(); } catch { detail = ""; }
-      throw new Error(`Planner endpoint responded ${response.status}${detail ? `: ${detail.slice(0, 220)}` : ""}`);
-    }
+    const csvPayload = extractCsvPayload(plannerText);
+    if (!csvPayload) return;
+    const sampleCount = parseCsvRecords(csvPayload).rows.length;
+    const derivedGraph = buildNetworkGraphFromCsv(csvPayload);
+    setGraphPanelGraph(derivedGraph && Array.isArray(derivedGraph.nodes) ? derivedGraph : null);
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: createRuntimeId("assistant"),
+        role: "assistant",
+        content: `Generated ${sampleCount} samples.\nPlugging into the Matrix...`,
+        uiType: "status-tooltip"
+      }
+    ]);
 
-    const responseContentType = response.headers.get("content-type") || "";
-    let plannerText = "";
-
-    if (responseContentType.includes("text/event-stream")) {
-      plannerText = await readPlannerResponseStream(response, (partialText) => {
-        setChatMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantPendingTurnId
-              ? { ...msg, content: partialText || THINKING_PLACEHOLDER_TEXT, pending: true }
-              : msg
-          )
-        );
-      });
-    } else {
-      const plannerResponse = await response.json();
-      plannerText = plannerResponse?.choices?.[0]?.message?.content || "";
-    }
-
-    if (!plannerText) throw new Error("Planner endpoint returned no completion content.");
-
-    const completionTimeMs = Date.now();
-    setChatMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === assistantPendingTurnId
-          ? {
-              ...msg,
-              content: plannerText,
-              pending: false,
-              thinkingDurationSec: Math.max(
-                0.1,
-                (completionTimeMs - (typeof msg.startedAtMs === "number" ? msg.startedAtMs : completionTimeMs)) / 1000
-              )
-            }
-          : msg
-      )
-    );
+    window.setTimeout(() => {
+      setIsGraphPanelOpen(true);
+    }, 220);
 
     if (shouldAutoScrollRef.current) {
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
     }
->>>>>>> origin/master
   };
 
   const handleComposerSubmit = async (event) => {
     event.preventDefault();
-<<<<<<< HEAD
-    const filesForSubmit = contextFiles.filter((file) => !removingContextIds.has(file.id));
-    const promptText = scenarioText.trim();
-
-    if (!promptText && filesForSubmit.length === 0) {
-      setSubmitNotice({
-        kind: "warning",
-        message: "Add a prompt or at least one context file before submitting."
-      });
-      return;
-    }
-
-    const assistantMessageId = createLocalMessageId("assistant");
-    const userMessageText = promptText || `Attached ${filesForSubmit.length} context file(s).`;
-    const firstEntry = !chatStarted;
-
-    setChatStarted(true);
-    setAutoScrollEnabled(true);
-    setScenarioText("");
-    setIsSubmitting(true);
-    setSubmitNotice({ kind: "idle", message: "" });
-
-    if (firstEntry) {
-      await delay(FIRST_CHAT_REVEAL_DELAY_MS);
-    }
-
-    setThinkingPanelExpanded(assistantMessageId, true);
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: createLocalMessageId("user"),
-        role: "user",
-        content: userMessageText,
-        thinking: false,
-        error: false
-      },
-      {
-        id: assistantMessageId,
-        role: "assistant",
-        content: "Thinking...",
-        thinking: true,
-        error: false
-      }
-    ]);
-
-    const formData = new FormData();
-    formData.append(
-      "prompt",
-      promptText || "Use the attached context files to generate representative simulation agents."
-    );
-    formData.append(
-      "context_manifest",
-      JSON.stringify(
-        filesForSubmit.map(({ path, file }) => ({
-          path,
-          name: file.name,
-          type: file.type || "application/octet-stream",
-          size: file.size
-        }))
-      )
-    );
-    filesForSubmit.forEach(({ file, path }) => {
-      formData.append("context_files", file, path);
-    });
-
-    try {
-      const plannerText = await streamPlannerText({
-        formData,
-        assistantMessageId
-      });
-      const csvPayload = extractCsvPayloadFromPlannerText(plannerText);
-
-      if (!csvPayload) {
-        setSubmitNotice({
-          kind: "warning",
-          message:
-            "Planner response rendered, but no valid CSV block was detected after </think>. " +
-            `Preview: "${compactSnippet(textAfterFinalThinkTag(plannerText))}"`
-        });
-        return;
-      }
-
-      const graphResponse = await fetch(NETWORK_BUILDER_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          csv_text: csvPayload,
-          directed: false
-        })
-      });
-
-      if (!graphResponse.ok) {
-        let detail = "";
-        try {
-          const payload = await graphResponse.json();
-          detail = payload?.detail || "";
-        } catch {
-          detail = "";
-        }
-        throw new Error(
-          `Network builder responded ${graphResponse.status}${detail ? `: ${detail}` : ""}`
-        );
-      }
-
-      const graph = await graphResponse.json();
-      window.__MATRIX_LAST_GRAPH__ = graph;
-
-      setSubmitNotice({
-        kind: "success",
-        message: `Built graph with ${graph?.stats?.node_count ?? 0} nodes and ${graph?.stats?.edge_count ?? 0} edges.`
-      });
-    } catch (error) {
-      updateAssistantMessage(assistantMessageId, {
-        content: error?.message || "Planner/network pipeline failed.",
-        thinking: false,
-        error: true
-      });
-      setSubmitNotice({
-        kind: "warning",
-        message: error?.message || "Planner/network pipeline failed."
-      });
-=======
     const promptText = scenarioText.trim();
 
     // If we're waiting for clarification answers, treat this as the user's reply
@@ -2507,6 +2171,7 @@ function App() {
       if (!promptText) return;
       const { originalPrompt, filesForSubmit } = clarifyState;
       const enrichedPrompt = `${originalPrompt}\n\nUser's clarifications: ${promptText}`;
+      const requestedSampleCount = extractRequestedSampleCountFromPrompt(enrichedPrompt);
 
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
       const assistantPendingTurnId = createRuntimeId("assistant");
@@ -2517,7 +2182,14 @@ function App() {
       setChatMessages((prev) => [
         ...prev,
         userTurn,
-        { id: assistantPendingTurnId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, startedAtMs: Date.now() }
+        {
+          id: assistantPendingTurnId,
+          role: "assistant",
+          content: THINKING_PLACEHOLDER_TEXT,
+          pending: true,
+          startedAtMs: Date.now(),
+          requestedSampleCount
+        }
       ]);
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
 
@@ -2561,6 +2233,7 @@ function App() {
 
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText || "[No prompt provided]" };
       const clarifyMsgId = createRuntimeId("assistant");
+      const requestedSampleCount = extractRequestedSampleCountFromPrompt(promptText);
 
       setChatMessages((prev) => [
         ...prev,
@@ -2570,14 +2243,53 @@ function App() {
       setScenarioText("");
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
 
-      const clarifyText = await fetchClarifyingQuestions(promptText);
+      const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
+      const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
+      if (!plannerRequestUrl) {
+        throw new Error("Planner endpoint is not configured.");
+      }
 
-      if (!clarifyText) {
-        // Timed out or failed — go straight to main response
+      const clarifyPayload = {
+        model: PLANNER_MODEL_ID,
+        temperature: 0.5,
+        stream: true,
+        max_tokens: 2000,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a simulation planner assistant. Decide whether clarifying questions are necessary before generating high-quality representative samples.\n\nRules:\n- Ask follow-up questions ONLY if the request is underspecified for accurate representative generation.\n- If clarification is NOT needed, output exactly: NO_FOLLOWUPS\n- If clarification IS needed, output ONLY a numbered list of questions (no prose), with as many questions as needed (1 or more).\n- Keep questions concrete and directly tied to improving representative quality, segmentation, and constraints.\n- Do not include explanations, preambles, or summaries."
+          },
+          {
+            role: "user",
+            content:
+              `Simulation request: "${promptText}"\n\n` +
+              `Attached context files: ${filesForSubmit.length}\n\n` +
+              "Determine whether follow-up questions are needed."
+          }
+        ]
+      };
+
+      const clarifyText = await streamPlannerReplyIntoMessage({
+        requestUrl: plannerRequestUrl,
+        payload: clarifyPayload,
+        assistantTurnId: clarifyMsgId,
+        timeoutMs: CLARIFY_TIMEOUT_MS
+      });
+
+      const cleanedClarifyText = stripThinkSections(clarifyText);
+      if (cleanedClarifyText.trim().toUpperCase() === "NO_FOLLOWUPS") {
         const assistantPendingTurnId = createRuntimeId("assistant");
         setChatMessages((prev) => [
           ...prev.filter((m) => m.id !== clarifyMsgId),
-          { id: assistantPendingTurnId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, startedAtMs: Date.now() }
+          {
+            id: assistantPendingTurnId,
+            role: "assistant",
+            content: THINKING_PLACEHOLDER_TEXT,
+            pending: true,
+            startedAtMs: Date.now(),
+            requestedSampleCount
+          }
         ]);
         try {
           await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId);
@@ -2594,23 +2306,58 @@ function App() {
         return;
       }
 
-      // Mark clarify message as done and wait for user's reply
-      setChatMessages((prev) =>
-        prev.map((m) => m.id === clarifyMsgId ? { ...m, content: clarifyText, pending: false } : m)
-      );
+      const questionLines = cleanedClarifyText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => /^\d+[\.\)]\s+\S/.test(line));
+
+      if (questionLines.length === 0) {
+        // Timed out or failed — go straight to main response
+        const assistantPendingTurnId = createRuntimeId("assistant");
+        setChatMessages((prev) => [
+          ...prev.filter((m) => m.id !== clarifyMsgId),
+          {
+            id: assistantPendingTurnId,
+            role: "assistant",
+            content: THINKING_PLACEHOLDER_TEXT,
+            pending: true,
+            startedAtMs: Date.now(),
+            requestedSampleCount
+          }
+        ]);
+        try {
+          await runMainQuery(promptText, filesForSubmit, assistantPendingTurnId);
+        } catch (error) {
+          const failureTimeMs = Date.now();
+          setChatMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantPendingTurnId
+                ? { ...msg, content: `Planner request failed: ${error.message || "Unknown error."}`, pending: false, error: true, thinkingDurationSec: Math.max(0.1, (failureTimeMs - (typeof msg.startedAtMs === "number" ? msg.startedAtMs : failureTimeMs)) / 1000) }
+                : msg
+            )
+          );
+        }
+        return;
+      }
+
+      // Clarifying response is already streamed and finalized; now wait for user follow-up.
       setClarifyState({ originalPrompt: promptText, filesForSubmit });
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
 
     } catch (error) {
       console.error("Composer submit error:", error);
->>>>>>> origin/master
     } finally {
       setIsSubmitting(false);
     }
   };
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell ${isGraphPanelOpen ? "graph-panel-open" : ""} ${
+        isGraphPanelResizing ? "graph-panel-resizing" : ""
+      }`}
+      style={{ "--graph-panel-width": `${graphPanelWidth}px` }}
+    >
       <DotWaveBackground />
 
       <input
@@ -2622,12 +2369,20 @@ function App() {
         onChange={handleFilePickerChange}
       />
 
+      <aside className={`graph-panel-shell ${isGraphPanelOpen ? "open" : ""}`} aria-hidden={!isGraphPanelOpen}>
+        <section className="graph-panel" aria-label="Network graph panel">
+          <GraphCirclePanel graph={graphPanelGraph} />
+        </section>
+        <button
+          type="button"
+          className="graph-panel-resizer"
+          aria-label="Resize network graph panel"
+          onPointerDown={handleGraphPanelResizeStart}
+          onKeyDown={handleGraphPanelResizeKeyDown}
+        />
+      </aside>
+
       <main className="main-panel">
-<<<<<<< HEAD
-        <AgentLiveAvatarCard />
-        <section className="hero">
-          <div className="hero-copy">
-=======
         <section
           className={`hero ${isHeroCompacted ? "chat-active" : ""} ${
             isHeroCompacted && contextFiles.length > 0 ? "chat-active-with-context" : ""
@@ -2637,104 +2392,10 @@ function App() {
             ref={heroCopyRef}
             className={`hero-copy ${isChatActive ? "hidden" : ""} ${isHeroCompacted ? "collapsed" : ""}`}
           >
->>>>>>> origin/master
             <h1>{displayTitle}</h1>
             <p className={`hero-subtitle ${showSubtitle ? "visible" : ""}`}>Simulate Anything</p>
           </div>
 
-<<<<<<< HEAD
-          <div
-            className={`chat-thread ${chatStarted ? "visible" : "hidden"}`}
-            ref={chatScrollRef}
-            onScroll={(event) => {
-              const node = event.currentTarget;
-              const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
-              setAutoScrollEnabled(distanceFromBottom < 52);
-            }}
-          >
-            <div className="chat-thread-inner">
-              {messages.map((message) => (
-                (() => {
-                  const isAssistant = message.role === "assistant";
-                  const { thinkingText, finalText } = isAssistant
-                    ? splitThinkContent(message.content, message.thinking)
-                    : { thinkingText: "", finalText: message.content };
-                  const hasThinkingTrace = Boolean(thinkingText.trim());
-                  const finalBodyText = finalText.trim();
-                  const isThinkingExpanded =
-                    hasThinkingTrace && (expandedThinkingIds.has(message.id) || message.thinking);
-                  const thinkingHtml = hasThinkingTrace ? markdownToHtml(thinkingText.trim()) : "";
-                  const finalHtml = finalBodyText ? markdownToHtml(finalBodyText) : "";
-                  const plainHtml = !isAssistant ? markdownToHtml(message.content) : "";
-
-                  return (
-                    <article
-                      key={message.id}
-                      className={`chat-message ${message.role} ${message.thinking ? "thinking" : ""} ${
-                        message.error ? "error" : ""
-                      }`}
-                    >
-                      {isAssistant && hasThinkingTrace ? (
-                        <div className="thinking-panel">
-                          <button
-                            type="button"
-                            className="thinking-toggle"
-                            aria-expanded={isThinkingExpanded}
-                            onClick={() =>
-                              setThinkingPanelExpanded(message.id, !isThinkingExpanded)
-                            }
-                          >
-                            <span
-                              className={`thinking-caret ${
-                                isThinkingExpanded ? "expanded" : ""
-                              }`}
-                              aria-hidden="true"
-                            >
-                              ▸
-                            </span>
-                            <span className="thinking-toggle-label">
-                              {message.thinking ? "Thinking..." : "Thought process"}
-                            </span>
-                          </button>
-                          <div
-                            className={`thinking-content ${
-                              isThinkingExpanded ? "expanded" : "collapsed"
-                            }`}
-                          >
-                            <div
-                              className="chat-message-text markdown-body chat-thinking-text"
-                              dangerouslySetInnerHTML={{ __html: thinkingHtml }}
-                            />
-                          </div>
-                        </div>
-                      ) : null}
-                      {isAssistant && finalBodyText ? (
-                        <div
-                          className="chat-message-text markdown-body"
-                          dangerouslySetInnerHTML={{ __html: finalHtml }}
-                        />
-                      ) : null}
-                      {!isAssistant ? (
-                        <div
-                          className="chat-message-text markdown-body"
-                          dangerouslySetInnerHTML={{ __html: plainHtml }}
-                        />
-                      ) : null}
-                      {isAssistant && !hasThinkingTrace && !finalBodyText ? (
-                        <div
-                          className="chat-message-text markdown-body"
-                          dangerouslySetInnerHTML={{ __html: markdownToHtml(message.content) }}
-                        />
-                      ) : null}
-                    </article>
-                  );
-                })()
-              ))}
-            </div>
-          </div>
-
-          <form className={`composer-shell ${chatStarted ? "docked" : ""}`} onSubmit={handleComposerSubmit}>
-=======
           <section
             className={`chat-thread ${isHeroCompacted ? "visible" : "hidden"}`}
             aria-live="polite"
@@ -2746,13 +2407,19 @@ function App() {
               <div className="chat-spacer" aria-hidden="true" />
               {chatMessages.map((message) => {
                 const isArtifactMessage = messageShouldRenderCsvArtifact(message);
+                const isStatusTooltipMessage =
+                  message.role === "assistant" && message.uiType === "status-tooltip";
                 return (
                   <article
-                    className={`chat-row ${message.role} ${isArtifactMessage ? "artifact" : ""}`}
+                    className={`chat-row ${message.role} ${isArtifactMessage ? "artifact" : ""} ${
+                      isStatusTooltipMessage ? "status-tooltip" : ""
+                    }`}
                     key={message.id}
                   >
                     <div
-                      className={`chat-bubble ${message.role} ${message.pending ? "pending" : ""} ${message.error ? "error" : ""} ${isArtifactMessage ? "artifact" : ""}`}
+                      className={`chat-bubble ${message.role} ${message.pending ? "pending" : ""} ${message.error ? "error" : ""} ${isArtifactMessage ? "artifact" : ""} ${
+                        isStatusTooltipMessage ? "status-tooltip" : ""
+                      }`}
                     >
                       <div className="chat-content">
                         {renderMessageContent(message, {
@@ -2773,7 +2440,6 @@ function App() {
             className={`composer-shell ${isHeroCompacted ? "chat-docked" : ""}`}
             onSubmit={handleComposerSubmit}
           >
->>>>>>> origin/master
             <div className={`composer-frame ${contextFiles.length > 0 ? "with-context" : ""}`}>
               <div
                 className={`context-preview-wrapper ${contextFiles.length > 0 ? "visible" : "hidden"}`}
@@ -2917,11 +2583,11 @@ function App() {
 
       {artifactModal ? (
         <div
-          className="artifact-backdrop"
+          className={`artifact-backdrop ${isArtifactModalClosing ? "closing" : ""}`}
           role="dialog"
           aria-modal="true"
           aria-label="CSV output preview"
-          onClick={() => setArtifactModal(null)}
+          onClick={closeArtifactModalWithAnimation}
         >
           <div className="artifact-modal" onClick={(event) => event.stopPropagation()}>
             <header className="artifact-header">
@@ -2932,7 +2598,7 @@ function App() {
               <button
                 type="button"
                 className="artifact-close-btn"
-                onClick={() => setArtifactModal(null)}
+                onClick={closeArtifactModalWithAnimation}
                 aria-label="Close CSV preview"
               >
                 <img src={closeIcon} alt="" />

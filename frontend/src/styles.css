@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Google+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Google+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&family=Google+Sans+Code:wght@300;400;500;600;700&display=swap");
 
 :root {
   --bg: #060606;
@@ -56,8 +56,209 @@ input {
   overflow: hidden;
 }
 
+.app-shell.graph-panel-resizing,
+.app-shell.graph-panel-resizing * {
+  cursor: ew-resize !important;
+  user-select: none;
+}
+
 .hidden-file-input {
   display: none;
+}
+
+.graph-panel-shell {
+  position: relative;
+  flex: 0 0 auto;
+  width: 0;
+  min-height: 100vh;
+  overflow: hidden;
+  will-change: width;
+  transition: width 720ms var(--ease-slingshot);
+  z-index: 3;
+}
+
+.graph-panel-shell.open {
+  width: var(--graph-panel-width, 360px);
+}
+
+.app-shell.graph-panel-resizing .graph-panel-shell {
+  transition: none;
+}
+
+.graph-panel {
+  height: 100%;
+  width: 100%;
+  background: #000;
+  padding: 0;
+  overflow: hidden;
+  transform-origin: left center;
+}
+
+.app-shell.graph-panel-open .graph-panel-shell.open .graph-panel {
+  animation: graph-panel-sling-in 720ms var(--ease-slingshot);
+}
+
+.graph-circle-canvas {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  width: 100%;
+  height: 100%;
+}
+
+.graph-circle-stage {
+  position: relative;
+  min-height: 0;
+  height: auto;
+  width: 100%;
+  display: block;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.graph-circle-empty {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  padding: 0 18px;
+  width: min(92%, 320px);
+  text-align: center;
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.graph-circle-canvas-element {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+}
+
+.graph-circle-canvas-element:active {
+  cursor: grabbing;
+}
+
+.graph-node-inspector {
+  position: relative;
+  min-height: 150px;
+  padding: 14px 16px 14px;
+  display: flex;
+  align-items: flex-start;
+  pointer-events: none;
+  overflow: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.9);
+}
+
+.graph-node-inspector-grid {
+  margin: 0;
+  width: 100%;
+  display: grid;
+  gap: 6px;
+}
+
+.graph-node-inspector-row {
+  display: grid;
+  grid-template-columns: minmax(88px, 128px) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.graph-node-inspector-row.name {
+  grid-template-columns: minmax(0, 1fr);
+  margin-bottom: 2px;
+}
+
+.graph-node-inspector-name {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.97);
+  font-size: 0.92rem;
+  line-height: 1.28;
+  font-weight: 700;
+  letter-spacing: 0.005em;
+  font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.graph-node-inspector-label {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 0.72rem;
+  line-height: 1.32;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.graph-node-inspector-value {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  word-break: break-word;
+  font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.graph-node-inspector-hint {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 0.8rem;
+  line-height: 1.35;
+  font-style: italic;
+  font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+@keyframes graph-panel-sling-in {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.9);
+  }
+  62% {
+    opacity: 1;
+    transform: scaleX(1.035);
+  }
+  100% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+.graph-panel-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 14px;
+  height: 100%;
+  transform: translateX(50%);
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  cursor: ew-resize;
+  z-index: 5;
+  touch-action: none;
+}
+
+.graph-panel-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  transition: background var(--motion-fast) var(--ease-soft);
+}
+
+.graph-panel-resizer:hover::before,
+.app-shell.graph-panel-resizing .graph-panel-resizer::before {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .wave-bg {
@@ -89,7 +290,9 @@ input {
 
 .main-panel {
   z-index: 2;
-  width: 100%;
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 100vh;
@@ -311,23 +514,6 @@ input {
 .hero {
   flex: 1;
   padding: 20px;
-<<<<<<< HEAD
-  display: grid;
-  align-content: center;
-  justify-items: center;
-  gap: 12px;
-  grid-template-rows: auto minmax(0, 0fr) auto;
-  min-height: 0;
-  animation: rise var(--motion-slow) var(--ease-smooth);
-  transition: grid-template-rows var(--motion-slow) var(--ease-spring);
-}
-
-.hero.active-chat {
-  align-content: stretch;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 10px;
-  padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
-=======
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -338,6 +524,7 @@ input {
 }
 
 .hero.chat-active {
+  position: relative;
   justify-content: flex-start;
   gap: 0;
   padding: 0 20px;
@@ -348,7 +535,6 @@ input {
 
 .hero.chat-active.chat-active-with-context {
   --active-chat-reserve: var(--chat-docked-reserve-with-context);
->>>>>>> origin/master
 }
 
 .hero-copy {
@@ -357,95 +543,6 @@ input {
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
-<<<<<<< HEAD
-  transition: opacity 520ms var(--ease-soft), filter 520ms var(--ease-soft);
-}
-
-.hero-copy.faded {
-  opacity: 0;
-  filter: blur(4px);
-  pointer-events: none;
-}
-
-.chat-thread {
-  width: min(800px, calc(100vw - 80px));
-  min-height: 0;
-  max-height: 0;
-  opacity: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 0 8px;
-  pointer-events: none;
-  scrollbar-width: none;
-  transition:
-    max-height var(--motion-slow) var(--ease-spring),
-    opacity var(--motion-medium) var(--ease-soft),
-    padding var(--motion-slow) var(--ease-spring);
-}
-
-.chat-thread::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
-
-.chat-thread.visible {
-  max-height: 100%;
-  opacity: 1;
-  padding: 0 8px 220px;
-  pointer-events: auto;
-}
-
-.chat-thread.hidden {
-  max-height: 0;
-  opacity: 0;
-  padding: 0 8px;
-  pointer-events: none;
-}
-
-.chat-thread-inner {
-  min-height: 100%;
-  display: grid;
-  align-content: end;
-  gap: 8px;
-}
-
-.chat-message {
-  max-width: 100%;
-  opacity: 0;
-  transform: translateY(12px) scale(0.985);
-  animation: message-enter 560ms var(--ease-slingshot) forwards;
-}
-
-.chat-message.user {
-  justify-self: end;
-  text-align: right;
-}
-
-.chat-message.assistant {
-  justify-self: start;
-  text-align: left;
-}
-
-.chat-message-text {
-  margin: 0;
-  font-family: inherit;
-  color: var(--text);
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: transparent;
-  border: none;
-  line-height: 1.45;
-  font-size: 0.98rem;
-}
-
-.chat-message.thinking .chat-message-text {
-  color: var(--muted-strong);
-  font-style: italic;
-}
-
-.chat-message.error .chat-message-text {
-  color: #f0be9d;
-=======
   max-height: 220px;
   overflow: hidden;
   opacity: 1;
@@ -463,7 +560,6 @@ input {
 .hero-copy.collapsed {
   max-height: 0;
   margin-bottom: 0;
->>>>>>> origin/master
 }
 
 .hero h1 {
@@ -492,144 +588,9 @@ input {
 }
 
 .composer-shell {
-  width: min(800px, calc(100vw - 80px));
+  width: min(800px, calc(100% - 80px));
   display: grid;
   gap: 10px;
-<<<<<<< HEAD
-  position: fixed;
-  left: 50%;
-  bottom: 50%;
-  z-index: 14;
-  transform: translate(-50%, 50%);
-  transition:
-    bottom var(--motion-slow) var(--ease-slingshot),
-    transform var(--motion-slow) var(--ease-slingshot),
-    opacity var(--motion-medium) var(--ease-soft);
-}
-
-.composer-shell.docked {
-  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
-  transform: translateX(-50%);
-  margin: 0;
-}
-
-.composer-shell.docked .context-note {
-  display: none;
-}
-
-.thinking-panel {
-  display: grid;
-  gap: 6px;
-}
-
-.thinking-toggle {
-  border: none;
-  background: transparent;
-  color: var(--muted-strong);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0;
-  justify-self: start;
-  font-size: 0.9rem;
-}
-
-.thinking-caret {
-  display: inline-block;
-  transition: transform var(--motion-medium) var(--ease-soft);
-}
-
-.thinking-caret.expanded {
-  transform: rotate(90deg);
-}
-
-.thinking-content {
-  max-height: 0;
-  opacity: 0;
-  overflow: hidden;
-  transition:
-    max-height var(--motion-slow) var(--ease-spring),
-    opacity var(--motion-medium) var(--ease-soft);
-}
-
-.thinking-content.expanded {
-  max-height: 420px;
-  opacity: 1;
-  overflow: auto;
-}
-
-.chat-thinking-text {
-  color: var(--muted);
-  font-style: italic;
-}
-
-.markdown-body p,
-.markdown-body ul,
-.markdown-body ol,
-.markdown-body pre,
-.markdown-body h1,
-.markdown-body h2,
-.markdown-body h3,
-.markdown-body h4,
-.markdown-body h5,
-.markdown-body h6 {
-  margin: 0 0 10px;
-}
-
-.markdown-body p:last-child,
-.markdown-body ul:last-child,
-.markdown-body ol:last-child,
-.markdown-body pre:last-child,
-.markdown-body h1:last-child,
-.markdown-body h2:last-child,
-.markdown-body h3:last-child,
-.markdown-body h4:last-child,
-.markdown-body h5:last-child,
-.markdown-body h6:last-child {
-  margin-bottom: 0;
-}
-
-.markdown-body ul,
-.markdown-body ol {
-  padding-left: 1.4rem;
-}
-
-.markdown-body li + li {
-  margin-top: 2px;
-}
-
-.markdown-body code {
-  font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 0.93em;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 6px;
-  padding: 0.1em 0.35em;
-}
-
-.markdown-body pre {
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 10px;
-  padding: 10px;
-  overflow-x: auto;
-}
-
-.markdown-body pre code {
-  background: transparent;
-  padding: 0;
-}
-
-.markdown-body hr {
-  border: none;
-  height: 1px;
-  background: rgba(255, 255, 255, 0.16);
-  margin: 14px 0;
-}
-
-.markdown-body a {
-  color: #d5e8ff;
-  text-decoration: underline;
-=======
   will-change: transform;
   transition:
     opacity var(--motion-medium) var(--ease-soft),
@@ -637,11 +598,11 @@ input {
 }
 
 .composer-shell.chat-docked {
-  position: fixed;
+  position: absolute;
   left: 50%;
   bottom: calc(env(safe-area-inset-bottom) + 30px);
   z-index: 12;
-  width: min(800px, calc(100vw - 40px));
+  width: min(800px, calc(100% - 40px));
   margin: 0;
   transform: translate(-50%, 0);
 }
@@ -652,7 +613,7 @@ input {
 }
 
 .chat-thread {
-  width: min(800px, calc(100vw - 80px));
+  width: min(800px, calc(100% - 80px));
   max-height: 0;
   overflow: hidden;
   opacity: 0;
@@ -743,6 +704,12 @@ input {
   background: transparent;
 }
 
+.chat-bubble.status-tooltip {
+  max-width: 100%;
+  width: fit-content;
+  padding: 8px 16px;
+}
+
 .chat-bubble.user::after,
 .chat-bubble.assistant::before {
   content: "";
@@ -757,10 +724,17 @@ input {
 
 .chat-bubble.user::after {
   right: 0;
+  box-shadow: none;
 }
 
 .chat-bubble.assistant::before {
   left: 0;
+  box-shadow: none;
+}
+
+.chat-bubble.assistant.status-tooltip::before {
+  top: 8px;
+  bottom: 8px;
 }
 
 .chat-bubble.user .chat-content {
@@ -781,10 +755,14 @@ input {
   width: 100%;
 }
 
-.chat-bubble.artifact.user::after,
-.chat-bubble.artifact.assistant::before {
+.chat-bubble.artifact.user::after {
   top: 8px;
   bottom: 8px;
+}
+
+.chat-bubble.artifact.assistant::before {
+  top: 0;
+  bottom: 0;
 }
 
 .chat-bubble.assistant.artifact .csv-artifact-card {
@@ -821,6 +799,15 @@ input {
   font-size: 0.95rem;
   font-weight: 500;
   color: var(--muted-strong);
+}
+
+.chat-status-tooltip {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--muted-strong);
+  opacity: 0.9;
+  font-style: italic;
+  white-space: pre-line;
 }
 
 .chat-exa-success-placeholder {
@@ -918,8 +905,8 @@ input {
   padding: 12px 14px;
   background: rgba(255, 255, 255, 0.04);
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
-    0 0 18px rgba(246, 246, 246, 0.08);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 0 10px rgba(246, 246, 246, 0.04);
   cursor: default;
 }
 
@@ -950,11 +937,7 @@ input {
 }
 
 .csv-artifact-main.interactive:hover {
-  transform: translateY(-1px);
-}
-
-.csv-artifact-main.interactive:active {
-  transform: translateY(0);
+  text-decoration: none;
 }
 
 .csv-artifact-main:focus-visible,
@@ -1121,7 +1104,6 @@ input {
   border: none;
   height: 1px;
   background: rgba(255, 255, 255, 0.18);
->>>>>>> origin/master
 }
 
 .composer-frame {
@@ -1396,22 +1378,22 @@ input {
 
 @keyframes csv-glow {
   0% {
-    opacity: 0.78;
+    opacity: 0.9;
     box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.07),
-      0 0 12px rgba(246, 246, 246, 0.06);
+      inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+      0 0 8px rgba(246, 246, 246, 0.04);
   }
   50% {
     opacity: 1;
     box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.15),
-      0 0 24px rgba(246, 246, 246, 0.16);
+      inset 0 0 0 1px rgba(255, 255, 255, 0.11),
+      0 0 14px rgba(246, 246, 246, 0.08);
   }
   100% {
-    opacity: 0.78;
+    opacity: 0.9;
     box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.07),
-      0 0 12px rgba(246, 246, 246, 0.06);
+      inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+      0 0 8px rgba(246, 246, 246, 0.04);
   }
 }
 
@@ -1563,6 +1545,13 @@ input {
   display: grid;
   place-items: center;
   padding: 20px;
+  opacity: 0;
+  animation: artifact-backdrop-in 220ms var(--ease-soft) forwards;
+}
+
+.artifact-backdrop.closing {
+  pointer-events: none;
+  animation: artifact-backdrop-out 220ms var(--ease-soft) forwards;
 }
 
 .artifact-modal {
@@ -1574,6 +1563,13 @@ input {
   display: grid;
   grid-template-rows: auto 1fr;
   overflow: hidden;
+  opacity: 0;
+  transform: translateY(16px) scale(0.985);
+  animation: artifact-modal-in 260ms var(--ease-spring) forwards;
+}
+
+.artifact-backdrop.closing .artifact-modal {
+  animation: artifact-modal-out 220ms var(--ease-soft) forwards;
 }
 
 .artifact-header {
@@ -1635,6 +1631,46 @@ input {
 .artifact-content {
   padding: 0 22px 22px;
   overflow: auto;
+}
+
+@keyframes artifact-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes artifact-backdrop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes artifact-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes artifact-modal-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
+  }
 }
 
 .artifact-table-wrap {
@@ -1711,21 +1747,10 @@ input {
   }
 }
 
-<<<<<<< HEAD
-@keyframes message-enter {
-  0% {
-    opacity: 0;
-    transform: translateY(12px) scale(0.985);
-  }
-  65% {
-    opacity: 1;
-    transform: translateY(-2px) scale(1);
-=======
 @keyframes chat-row-in {
   0% {
     opacity: 0;
     transform: translateY(18px) scale(0.98);
->>>>>>> origin/master
   }
   100% {
     opacity: 1;
@@ -1733,8 +1758,6 @@ input {
   }
 }
 
-<<<<<<< HEAD
-=======
 /* ── Clarify card ─────────────────────────────────────────────────────────── */
 
 .clarify-card {
@@ -1830,14 +1853,13 @@ input {
   transform: scale(0.95);
 }
 
->>>>>>> origin/master
 @media (max-width: 860px) {
   .composer-shell {
-    width: min(760px, calc(100vw - 32px));
+    width: min(760px, calc(100% - 32px));
   }
 
   .chat-thread {
-    width: min(760px, calc(100vw - 32px));
+    width: min(760px, calc(100% - 32px));
   }
 }
 
@@ -1866,7 +1888,7 @@ input {
   }
 
   .composer-shell.chat-docked {
-    width: calc(100vw - 20px);
+    width: calc(100% - 20px);
     left: 50%;
     bottom: calc(env(safe-area-inset-bottom) + 30px);
   }

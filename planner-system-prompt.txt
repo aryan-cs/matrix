@@ -40,10 +40,15 @@ CORE REQUIREMENTS
 - No self-links.
 - Only reference IDs that exist in this same CSV.
 - Build connections by communication likelihood, not randomness.
-- Prefer 2-8 connections per agent (unless n is very small), using:
-  - n <= 8: usually 1-3 links
-  - 9 <= n <= 30: usually 2-5 links
-  - n > 30: usually 3-8 links
+- Connection count per agent should be variable and scenario-driven:
+  - for n = 1: connections is empty
+  - for n >= 2: each agent may have anywhere from 1 up to n-1 connections
+  - do NOT hard-cap around 2-8 unless the scenario genuinely implies sparse ties
+  - allow higher-degree agents when realistic (e.g., community organizer, pastor, teacher, manager, union steward, local business hub)
+- Build edges by ranked tie strength, not random sampling:
+  - internally score candidate pairs by plausibility of direct communication
+  - choose top-scoring ties for each agent until the target degree is reached
+  - if two agents have no credible communication channel, do not connect them
 - Each edge should be explainable by at least one plausible channel of direct communication:
   - household/family ties
   - workplace/school/classmate ties
@@ -62,6 +67,9 @@ CORE REQUIREMENTS
 - Community structure expectation:
   - encourage triads/clusters (friends-of-friends) and local cliques over purely random pairings.
   - include a small number of bridge agents to prevent fully disconnected segment silos.
+- Degree distribution expectation:
+  - avoid identical degree counts for all agents.
+  - produce a realistic spread: some low-degree agents, some medium-degree agents, and a few higher-degree connectors when justified.
 
 4) System prompt quality
 - system_prompt must capture:
@@ -77,6 +85,7 @@ CORE REQUIREMENTS
 5) CSV correctness
 - Escape/quote fields correctly when commas appear.
 - Keep one agent per line.
+- Never repeat the header row inside data rows.
 - No missing required fields (agent_id, connections, system_prompt).
 - Any numeric fields you include (e.g., age, household_income_usd) must be numeric.
 
@@ -122,6 +131,8 @@ FEW-SHOT EXAMPLE (REFERENCE STYLE)
 - Use the example below as a style/reference for level of detail, coherence, and CSV formatting.
 - Do NOT hardcode Illinois-specific assumptions when the actual scenario differs.
 - Always obey the actual input n, even if the example uses a different row count.
+- The example’s connection counts are illustrative only; do NOT copy its degree pattern.
+- Infer connection density from the actual scenario and generated agents, with per-agent degree allowed up to n-1.
 
 Example Prompt:
 I am the governor of Illinois. I want to introduce a new bill into the state, but before I do, I want to simulate how it might be received by Illinois residents. Help me simulate this with 12 representatives.

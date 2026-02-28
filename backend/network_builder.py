@@ -5,10 +5,7 @@ import io
 import json
 import os
 import re
-<<<<<<< HEAD
 import urllib.parse
-=======
->>>>>>> origin/master
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -38,19 +35,16 @@ TEXT_EXTENSIONS = {
     ".log",
 }
 DEFAULT_PLANNER_ENDPOINT = (
-    "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server.modal.run/v1/chat/completions"
+    "https://aryan-cs--deepseek-r1-32b-openai-server.modal.run/v1/chat/completions"
 )
 DEFAULT_PLANNER_MODEL_ID = "deepseek-r1"
 PLANNER_CONTEXT_MAX_TOTAL_CHARS = 26000
 PLANNER_CONTEXT_MAX_FILE_CHARS = 5000
-<<<<<<< HEAD
 DEFAULT_LIVEAVATAR_BASE_URL = "https://api.liveavatar.com/v1"
 DEFAULT_AGENTS_CSV_PATH = Path(__file__).resolve().parent.parent / "backend-test" / "agents.csv"
 DEFAULT_AGENT_TO_AVATAR_PATH = (
     Path(__file__).resolve().parent.parent / "avatars" / "agent_to_avatar.json"
 )
-=======
->>>>>>> origin/master
 
 
 class GraphBuildRequest(BaseModel):
@@ -91,7 +85,6 @@ class PlannerContextResponse(BaseModel):
     model: str
 
 
-<<<<<<< HEAD
 class AvatarAgentSummary(BaseModel):
     agent_id: str
     full_name: str
@@ -122,8 +115,6 @@ class AvatarSessionStartResponse(BaseModel):
     system_prompt: str
 
 
-=======
->>>>>>> origin/master
 app = FastAPI(
     title="Matrix Backend API",
     version="0.1.0",
@@ -193,6 +184,13 @@ def _normalize_record(record: dict[str, Any], fieldnames: list[str]) -> dict[str
         raw_value = record.get(field, "")
         normalized[field] = str(raw_value).strip() if raw_value is not None else ""
     return normalized
+
+
+def _is_repeated_header_row(row: dict[str, str], fieldnames: list[str]) -> bool:
+    for name in fieldnames:
+        if row.get(name, "").strip().lower() != name.strip().lower():
+            return False
+    return True
 
 
 def _parse_connections(raw_connections: str) -> list[str]:
@@ -351,7 +349,6 @@ def _planner_stream_events(prompt: str, context_block: str):
             yield "data: [DONE]\n\n"
 
 
-<<<<<<< HEAD
 def _agents_csv_path() -> Path:
     configured = os.getenv("AVATAR_AGENTS_CSV", str(DEFAULT_AGENTS_CSV_PATH)).strip()
     return Path(configured)
@@ -453,8 +450,6 @@ def _liveavatar_request(
     return parsed
 
 
-=======
->>>>>>> origin/master
 def _parse_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
     with io.StringIO(csv_text) as handle:
         reader = csv.DictReader(handle)
@@ -472,6 +467,8 @@ def _parse_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
         for line_index, record in enumerate(reader, start=2):
             normalized = _normalize_record(record, fieldnames)
             if not any(value for value in normalized.values()):
+                continue
+            if _is_repeated_header_row(normalized, fieldnames):
                 continue
 
             agent_id = normalized.get("agent_id", "")
@@ -700,9 +697,6 @@ async def planner_context_stream(
             "X-Accel-Buffering": "no",
         },
     )
-<<<<<<< HEAD
-
-
 @app.get("/api/avatar/agents", response_model=AvatarAgentsResponse)
 async def avatar_agents() -> AvatarAgentsResponse:
     try:
@@ -799,5 +793,3 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
         session_id=session_id,
         system_prompt=agent.get("system_prompt", ""),
     )
-=======
->>>>>>> origin/master

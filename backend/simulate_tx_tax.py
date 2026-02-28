@@ -1,10 +1,26 @@
 import asyncio
 import httpx
 import json
+import os
 import random
 
-# Single entry point for your 10 warm Modal containers
-MODAL_ENDPOINT = "https://jajooananya--deepseek-r1-1p5b-deepseekserver-openai-server.modal.run/v1/chat/completions"
+def planner_chat_endpoint_for(base_or_endpoint: str) -> str:
+    trimmed = (base_or_endpoint or "").strip().rstrip("/")
+    if not trimmed:
+        return ""
+    if trimmed.endswith("/v1/chat/completions"):
+        return trimmed
+    return f"{trimmed}/v1/chat/completions"
+
+# Single entry point for your Modal containers (override with env vars).
+DEFAULT_MODAL_BASE = "https://aryan-cs--deepseek-r1-32b-openai-server.modal.run"
+RAW_MODAL_ENDPOINT = (
+    os.getenv("SIM_MODAL_ENDPOINT")
+    or os.getenv("MODAL_ENDPOINT")
+    or os.getenv("VITE_PLANNER_MODEL_ENDPOINT")
+    or DEFAULT_MODAL_BASE
+)
+MODAL_ENDPOINT = planner_chat_endpoint_for(RAW_MODAL_ENDPOINT)
 
 async def call_agent_llm(agent_id, system_prompt, incoming_message):
     # Extract first name so we can explicitly ban third-person self-reference
