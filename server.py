@@ -1,28 +1,42 @@
 """
-DeepSeek-R1-Distill-Qwen-32B on Modal — served via vLLM with an OpenAI-compatible API.
+DeepSeek-R1-Distill-Qwen-32B on Modal via vLLM (OpenAI-compatible API).
 
 Usage:
-  # one-time: download weights into a Modal Volume
-  modal run serve.py::download_model
+  # 1) Optional one-time pre-download into Modal Volume
+  modal run server.py::download_model
 
-  # deploy the inference server (ephemeral, stops on Ctrl-C)
-  modal serve serve.py
+  # 2) Start ephemeral dev endpoint (stops with Ctrl+C)
+  modal serve server.py
 
-  # deploy persistently
-  modal deploy serve.py
+  # 3) Deploy persistent endpoint
+  modal deploy server.py
+
+  # 4) Smoke test deployed endpoint
+  DEEPSEEK_SMOKE_TEST_URL="https://<your-endpoint>/v1/chat/completions" modal run server.py
 """
+
+from __future__ import annotations
+
+import os
+import time
 
 import modal
 
-APP_NAME = "deepseek-r1-32b"
-MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
-MODEL_DIR = "/model"
-VOLUME_NAME = "deepseek-r1-32b-weights"
-VLLM_PORT = 8000
+APP_NAME = os.getenv("MODAL_APP_NAME", "deepseek-r1-32b")
+MODEL_ID = os.getenv("DEEPSEEK_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B")
+SERVED_MODEL_NAME = os.getenv("DEEPSEEK_SERVED_MODEL_NAME", "deepseek-r1")
+MODEL_DIR = os.getenv("DEEPSEEK_MODEL_DIR", "/model")
+VOLUME_NAME = os.getenv("DEEPSEEK_VOLUME_NAME", "deepseek-r1-32b-weights")
+VLLM_PORT = int(os.getenv("VLLM_PORT", "8000"))
+DEFAULT_SMOKE_TEST_URL = os.getenv("DEEPSEEK_SMOKE_TEST_URL", "")
 
-# ---------------------------------------------------------------------------
-# Container image — matches Modal's official vLLM example
-# ---------------------------------------------------------------------------
+# Runtime knobs (can be overridden with env vars at deploy time).
+GPU_CONFIG = os.getenv("DEEPSEEK_GPU", "A100-80GB:2")
+TENSOR_PARALLEL_SIZE = int(os.getenv("DEEPSEEK_TP", "2"))
+MAX_MODEL_LEN = int(os.getenv("DEEPSEEK_MAX_MODEL_LEN", "32768"))
+GPU_MEMORY_UTILIZATION = os.getenv("DEEPSEEK_GPU_MEMORY_UTIL", "0.92")
+WEB_STARTUP_TIMEOUT_SEC = int(os.getenv("DEEPSEEK_WEB_STARTUP_TIMEOUT_SEC", "3600"))
+
 image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12"
@@ -37,88 +51,120 @@ image = (
 )
 
 app = modal.App(APP_NAME)
-
-# Persistent volume — weights survive across runs so you only download once.
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
-# ---------------------------------------------------------------------------
-# Step 1: download weights  (run once:  modal run serve.py::download_model)
-# ---------------------------------------------------------------------------
+
+def _model_exists() -> bool:
+    # vLLM expects config + tokenizer files to exist in the model directory.
+    required = [
+        os.path.join(MODEL_DIR, "config.json"),
+        os.path.join(MODEL_DIR, "tokenizer.json"),
+    ]
+    return all(os.path.exists(path) for path in required)
+
+
+def _download_model_if_needed() -> None:
+    if _model_exists():
+        return
+
+    from huggingface_hub import snapshot_download
+
+    print(f"Model files missing under {MODEL_DIR}. Downloading {MODEL_ID}...")
+    snapshot_download(
+        repo_id=MODEL_ID,
+        local_dir=MODEL_DIR,
+    )
+    volume.commit()
+    print("Model download complete.")
+
+
 @app.function(
     image=image,
     volumes={MODEL_DIR: volume},
-    timeout=7200,
+    timeout=60 * 60 * 2,
     cpu=8,
     memory=32768,
 )
-def download_model():
-    from huggingface_hub import snapshot_download
-    snapshot_download(MODEL_ID, local_dir=MODEL_DIR)
-    volume.commit()
-    print("Done.")
+def download_model() -> None:
+    """One-time pre-download of model weights into the Modal volume."""
+    _download_model_if_needed()
 
 
-# ---------------------------------------------------------------------------
-# Step 2: serve
-# ---------------------------------------------------------------------------
-@app.cls(
+@app.function(
     image=image,
-    gpu="A100-80GB:2",
+    gpu=GPU_CONFIG,
     volumes={MODEL_DIR: volume},
-    timeout=3600,
+    timeout=60 * 60 * 24,
     scaledown_window=300,
 )
-@modal.concurrent(max_inputs=4)
-class DeepSeekServer:
-    @modal.enter()
-    def start_server(self):
-        import subprocess, time, socket
+@modal.web_server(port=VLLM_PORT, startup_timeout=WEB_STARTUP_TIMEOUT_SEC)
+def openai_server() -> None:
+    """Starts vLLM OpenAI server inside container and exposes it over Modal web endpoint."""
+    import subprocess
 
-        cmd = [
-            "vllm", "serve", MODEL_DIR,
-            "--served-model-name", "deepseek-r1",
-            "--tensor-parallel-size", "2",
-            "--host", "0.0.0.0",
-            "--port", str(VLLM_PORT),
-            "--max-model-len", "32768",
-            "--gpu-memory-utilization", "0.92",
-            "--enforce-eager",
-            "--trust-remote-code",
-        ]
-        self._proc = subprocess.Popen(cmd)
+    _download_model_if_needed()
 
-        # wait for server to be ready (model loading can take ~5 min)
-        for _ in range(600):
-            try:
-                s = socket.create_connection(("127.0.0.1", VLLM_PORT), timeout=1)
-                s.close()
-                print("vLLM server is ready.")
-                return
-            except OSError:
-                time.sleep(1)
-        raise RuntimeError("vLLM server did not start in time.")
+    cmd = [
+        "vllm",
+        "serve",
+        MODEL_DIR,
+        "--served-model-name",
+        SERVED_MODEL_NAME,
+        "--tensor-parallel-size",
+        str(TENSOR_PARALLEL_SIZE),
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(VLLM_PORT),
+        "--max-model-len",
+        str(MAX_MODEL_LEN),
+        "--gpu-memory-utilization",
+        str(GPU_MEMORY_UTILIZATION),
+        "--enforce-eager",
+        "--trust-remote-code",
+    ]
 
-    @modal.exit()
-    def stop_server(self):
-        self._proc.terminate()
+    print("Launching vLLM:", " ".join(cmd))
+    proc = subprocess.Popen(cmd)
 
-    @modal.web_server(port=VLLM_PORT, startup_timeout=600)
-    def openai_server(self):
-        pass  # server is already running from start_server()
+    # Fail fast with a clear error if vLLM crashes immediately.
+    time.sleep(8)
+    exit_code = proc.poll()
+    if exit_code is not None:
+        raise RuntimeError(f"vLLM process exited during startup with code {exit_code}")
 
 
-# ---------------------------------------------------------------------------
-# Quick smoke-test  (modal run serve.py)
-# ---------------------------------------------------------------------------
 @app.local_entrypoint()
-def main():
-    import urllib.request, json
-    url = "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server-dev.modal.run/v1/chat/completions"
-    body = json.dumps({
-        "model": "deepseek-r1",
-        "messages": [{"role": "user", "content": "Hello! What can you do?"}],
-        "max_tokens": 200,
-    }).encode()
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req) as resp:
-        print(json.loads(resp.read())["choices"][0]["message"]["content"])
+def main(url: str = "") -> None:
+    """Smoke test a deployed endpoint URL."""
+    import json
+    import urllib.request
+
+    endpoint = url or DEFAULT_SMOKE_TEST_URL
+    if not endpoint:
+        raise RuntimeError(
+            "Provide endpoint via: modal run server.py --url https://<endpoint>/v1/chat/completions "
+            "or set DEEPSEEK_SMOKE_TEST_URL in your environment."
+        )
+
+    body = json.dumps(
+        {
+            "model": SERVED_MODEL_NAME,
+            "messages": [{"role": "user", "content": "Say OK"}],
+            "max_tokens": 32,
+            "temperature": 0,
+        }
+    ).encode()
+
+    req = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        payload = json.loads(resp.read())
+
+    message = payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+    print("Smoke test response:")
+    print(message)

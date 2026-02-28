@@ -2,9 +2,11 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
-const DEFAULT_PLANNER_MODEL_ENDPOINT =
-  "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server.modal.run";
+const DEFAULT_PLANNER_MODEL_ENDPOINT = "";
 const DEFAULT_PLANNER_MODEL_ID = "deepseek-r1";
+const DEFAULT_PLANNER_PROXY_PATH = "/api/planner/chat";
+const DEFAULT_EXA_PROXY_PATH = "/api/exa/search";
+const DEFAULT_EXA_API_ENDPOINT = "";
 
 function plannerChatEndpointFor(baseOrEndpoint) {
   const trimmed = (baseOrEndpoint || "").trim().replace(/\/+$/, "");
@@ -84,11 +86,13 @@ function plannerLoggingProxy(env) {
     DEFAULT_PLANNER_MODEL_ENDPOINT;
   const plannerModelId = env.VITE_PLANNER_MODEL_ID || DEFAULT_PLANNER_MODEL_ID;
   const plannerApiKey = env.VITE_PLANNER_API_KEY || "";
+  const plannerProxyPath =
+    env.VITE_PLANNER_PROXY_PATH || env.PLANNER_PROXY_PATH || DEFAULT_PLANNER_PROXY_PATH;
 
   return {
     name: "planner-logging-proxy",
     configureServer(server) {
-      server.middlewares.use("/api/planner/chat", async (req, res, next) => {
+      server.middlewares.use(plannerProxyPath, async (req, res, next) => {
         if (req.method !== "POST") {
           next();
           return;
@@ -277,14 +281,23 @@ function plannerLoggingProxy(env) {
 
 function exaProxy(env) {
   const exaApiKey = env.EXA_API_KEY || "";
+  const exaProxyPath = env.VITE_EXA_PROXY_PATH || env.EXA_PROXY_PATH || DEFAULT_EXA_PROXY_PATH;
+  const exaApiEndpoint = env.EXA_API_ENDPOINT || DEFAULT_EXA_API_ENDPOINT;
 
   return {
     name: "exa-proxy",
     configureServer(server) {
-      server.middlewares.use("/api/exa/search", async (req, res) => {
+      server.middlewares.use(exaProxyPath, async (req, res) => {
         if (req.method !== "POST") {
           res.statusCode = 405;
           res.end("Method Not Allowed");
+          return;
+        }
+
+        if (!exaApiEndpoint) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "EXA_API_ENDPOINT is not configured." }));
           return;
         }
 
@@ -300,7 +313,7 @@ function exaProxy(env) {
 
         let upstream;
         try {
-          upstream = await fetch("https://api.exa.ai/search", {
+          upstream = await fetch(exaApiEndpoint, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",

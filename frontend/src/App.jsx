@@ -37,20 +37,40 @@ const DEFAULT_PLANNER_SYSTEM_PROMPT =
   "You are a simulation planner assistant. Use provided prompt + context files to draft planning assumptions and key demographic factors.";
 const PLANNER_SYSTEM_PROMPT = (plannerSystemPromptRaw || "").trim() || DEFAULT_PLANNER_SYSTEM_PROMPT;
 const CHAT_AUTO_SCROLL_THRESHOLD_PX = 40;
-const DEFAULT_PLANNER_MODEL_ENDPOINT =
-  "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server.modal.run";
-const PLANNER_MODEL_ENDPOINT =
+const DEFAULT_PLANNER_MODEL_ENDPOINT = "";
+const DEFAULT_PLANNER_MODEL_ID = "deepseek-r1";
+const DEFAULT_PLANNER_DEV_PROXY_PATH = "/api/planner/chat";
+const DEFAULT_EXA_PROXY_PATH = "/api/exa/search";
+const DEFAULT_CONTEXT_MAX_TOTAL_CHARS = 26000;
+const DEFAULT_CONTEXT_MAX_FILE_CHARS = 5000;
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+const PLANNER_MODEL_ENDPOINT = (
   import.meta.env.VITE_PLANNER_CONTEXT_ENDPOINT ||
   import.meta.env.VITE_PLANNER_MODEL_ENDPOINT ||
-  DEFAULT_PLANNER_MODEL_ENDPOINT;
-const PLANNER_MODEL_ID = import.meta.env.VITE_PLANNER_MODEL_ID || "deepseek-r1";
-const PLANNER_API_KEY = import.meta.env.VITE_PLANNER_API_KEY || "";
-const PLANNER_DEV_PROXY_PATH = "/api/planner/chat";
+  DEFAULT_PLANNER_MODEL_ENDPOINT
+).trim();
+const PLANNER_MODEL_ID = (import.meta.env.VITE_PLANNER_MODEL_ID || DEFAULT_PLANNER_MODEL_ID).trim();
+const PLANNER_API_KEY = (import.meta.env.VITE_PLANNER_API_KEY || "").trim();
+const PLANNER_DEV_PROXY_PATH = (
+  import.meta.env.VITE_PLANNER_PROXY_PATH || DEFAULT_PLANNER_DEV_PROXY_PATH
+).trim();
 const USE_PLANNER_DEV_PROXY =
   import.meta.env.DEV && import.meta.env.VITE_USE_PLANNER_PROXY !== "false";
-const EXA_PROXY_PATH = "/api/exa/search";
-const PLANNER_CONTEXT_MAX_TOTAL_CHARS = 26000;
-const PLANNER_CONTEXT_MAX_FILE_CHARS = 5000;
+const EXA_PROXY_PATH = (import.meta.env.VITE_EXA_PROXY_PATH || DEFAULT_EXA_PROXY_PATH).trim();
+const PLANNER_CONTEXT_MAX_TOTAL_CHARS = parsePositiveInt(
+  import.meta.env.VITE_PLANNER_CONTEXT_MAX_TOTAL_CHARS,
+  DEFAULT_CONTEXT_MAX_TOTAL_CHARS
+);
+const PLANNER_CONTEXT_MAX_FILE_CHARS = parsePositiveInt(
+  import.meta.env.VITE_PLANNER_CONTEXT_MAX_FILE_CHARS,
+  DEFAULT_CONTEXT_MAX_FILE_CHARS
+);
 const TEXT_PREVIEW_EXTENSIONS = new Set([
   "txt",
   "md",
@@ -500,10 +520,50 @@ function extractCsvPayload(text) {
   if (!postThinkSection) return "";
 
   const trimmed = postThinkSection.trim();
-  const fencedMatch = trimmed.match(/^```(?:csv)?\s*\n([\s\S]*?)\n```$/i);
+  const fencedMatch = trimmed.match(/```(?:csv)?\s*\n([\s\S]*?)\n```/i);
   if (fencedMatch) {
     return fencedMatch[1].trim();
   }
+
+  const lines = trimmed.split("\n");
+  const requiredHeaderSignals = new Set(["run_id", "agent_id", "id", "connections", "system_prompt"]);
+
+  const headerIndex = lines.findIndex((line) => {
+    const candidate = line.trim();
+    if (!candidate || !looksLikeCsvLine(candidate)) return false;
+
+    const fields = parseCsvLine(candidate)
+      .map((field) => field.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (fields.length < 2) return false;
+    return fields.some((field) => requiredHeaderSignals.has(field));
+  });
+
+  if (headerIndex !== -1) {
+    const csvLines = [];
+
+    for (let i = headerIndex; i < lines.length; i += 1) {
+      const candidate = lines[i].trim();
+
+      if (!candidate) {
+        if (csvLines.length > 0) break;
+        continue;
+      }
+
+      if (!looksLikeCsvLine(candidate)) {
+        if (csvLines.length > 0) break;
+        continue;
+      }
+
+      csvLines.push(candidate);
+    }
+
+    if (csvLines.length > 0) {
+      return csvLines.join("\n").trim();
+    }
+  }
+
   return trimmed;
 }
 
