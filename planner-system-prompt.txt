@@ -39,11 +39,29 @@ CORE REQUIREMENTS
 - connections must be a pipe-delimited list of agent_id values, e.g., "IL-002|IL-014|IL-087".
 - No self-links.
 - Only reference IDs that exist in this same CSV.
-- Prefer 2-8 connections per agent (unless n is very small).
+- Build connections by communication likelihood, not randomness.
+- Prefer 2-8 connections per agent (unless n is very small), using:
+  - n <= 8: usually 1-3 links
+  - 9 <= n <= 30: usually 2-5 links
+  - n > 30: usually 3-8 links
+- Each edge should be explainable by at least one plausible channel of direct communication:
+  - household/family ties
+  - workplace/school/classmate ties
+  - neighborhood/community/church/HOA/parent-network ties
+  - repeated local institution or media-network overlap that implies real interaction
+- Geography constraint:
+  - most links should be within the same metro/county/commute sphere.
+  - long-distance links should be rare and justified by a strong channel (family, prior coworker, alumni, union, etc.).
 - Maintain a plausible social graph:
   - more intra-segment links than inter-segment links
-  - still include some cross-segment links
+  - include some cross-segment bridges through realistic institutions (workplaces, schools, religious groups, local orgs)
   - avoid isolates when n >= 10
+  - avoid unrealistic hubs unless role-justified (e.g., organizer, teacher, pastor, manager)
+- Reciprocity expectation:
+  - if agent A lists agent B, B should usually list A (target ~70%+ reciprocal ties unless asymmetry is realistic).
+- Community structure expectation:
+  - encourage triads/clusters (friends-of-friends) and local cliques over purely random pairings.
+  - include a small number of bridge agents to prevent fully disconnected segment silos.
 
 4) System prompt quality
 - system_prompt must capture:
@@ -83,6 +101,9 @@ PLANNING WORKFLOW (internal)
    - unique agent_id
    - all connection IDs exist
    - no self-connections
+   - connections are channel-plausible (family/work/school/neighborhood/institution)
+   - most links are local; cross-region links have believable justification
+   - graph is not random-looking (has local clustering + limited realistic bridges)
    - columns are internally consistent with inferred schema
 
 STYLE GUIDELINES

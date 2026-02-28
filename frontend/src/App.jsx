@@ -32,6 +32,7 @@ const CHAT_ENTER_TRANSITION_MS = 620;
 const CHAT_INITIAL_MESSAGE_STAGGER_MS = 500;
 const COMPOSER_DOCK_ANIMATION_MS = 680;
 const THINKING_PLACEHOLDER_TEXT = "Thinking...";
+const EXA_SUCCESS_PLACEHOLDER_TEXT = "Searched the web with Exa.";
 const DEFAULT_PLANNER_SYSTEM_PROMPT =
   "You are a simulation planner assistant. Use provided prompt + context files to draft planning assumptions and key demographic factors.";
 const PLANNER_SYSTEM_PROMPT = (plannerSystemPromptRaw || "").trim() || DEFAULT_PLANNER_SYSTEM_PROMPT;
@@ -735,8 +736,24 @@ function isLikelyCsvDraft(text) {
   if (lines.length === 0) return false;
 
   const firstLine = lines[0];
-  if (firstLine.startsWith("```")) return true;
-  return looksLikeCsvLine(firstLine);
+  if (firstLine.startsWith("```csv")) return true;
+
+  // Avoid misclassifying numbered clarifying questions with commas as CSV.
+  if (/^\d+[\.\)]\s+/.test(firstLine)) return false;
+  if (firstLine.includes("?")) return false;
+  if (!looksLikeCsvLine(firstLine)) return false;
+
+  const headerFields = parseCsvLine(firstLine).map((field) => field.trim().toLowerCase());
+  if (headerFields.length < 2) return false;
+
+  // Planner contract: these columns are always present in generated master CSVs.
+  const hasRequiredHeaderSignal =
+    headerFields.includes("agent_id") ||
+    headerFields.includes("connections") ||
+    headerFields.includes("system_prompt") ||
+    headerFields.includes("run_id");
+
+  return hasRequiredHeaderSignal;
 }
 
 function thoughtDurationLabel(durationSeconds) {
@@ -782,7 +799,14 @@ function renderMessageContent(message, options = {}) {
 
   const messageText = String(message.content || "");
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
-    return <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>;
+    return (
+      <>
+        <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
+        {message.exaWebSearchSuccess ? (
+          <p className="chat-exa-success-placeholder">{EXA_SUCCESS_PLACEHOLDER_TEXT}</p>
+        ) : null}
+      </>
+    );
   }
 
   const treatUnclosedAsThinking = Boolean(message.pending) || /<think\s*>/i.test(messageText);
@@ -1072,31 +1096,6 @@ function formatExaContext(exaData) {
   return `\n\n[Web research via Exa — ${exaData.results.length} sources]\n${snippets.join("\n\n")}`;
 }
 
-
-// ── ExaStatusPill component ─────────────────────────────────────────────────
-
-function ExaStatusPill({ status }) {
-  if (!status) return null;
-  const isSearching = status === "searching";
-  const isError = status === "error";
-  const count = typeof status === "object" ? status.count : null;
-
-  return (
-    <div className={`exa-pill ${isSearching ? "searching" : isError ? "error" : "done"}`}>
-      <span className="exa-pill-logo">exa</span>
-      {isSearching && (
-        <span className="exa-pill-dots">
-          <span /><span /><span />
-        </span>
-      )}
-      {!isSearching && !isError && (
-        <span className="exa-pill-text">{count} source{count !== 1 ? "s" : ""} found</span>
-      )}
-      {isError && <span className="exa-pill-text">search unavailable</span>}
-    </div>
-  );
-}
-
 function App() {
   const [displayTitle, setDisplayTitle] = useState(TITLE_TEXT);
   const [showSubtitle, setShowSubtitle] = useState(false);
@@ -1120,7 +1119,6 @@ function App() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [removingContextIds, setRemovingContextIds] = useState(() => new Set());
   const [clarifyState, setClarifyState] = useState(null);
-  const [exaStatus, setExaStatus] = useState(null);
   const fileInputRef = useRef(null);
   const chatScrollRef = useRef(null);
   const composerShellRef = useRef(null);
@@ -1619,14 +1617,16 @@ function App() {
     const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
     if (!plannerRequestUrl) throw new Error("Planner endpoint is not configured.");
 
-    // Exa search runs in parallel — fire and await together
-    setExaStatus("searching");
+    // Exa search runs before planner completion for retrieval context
     const exaPromise = runExaSearch(enrichedPrompt);
     const exaData = await exaPromise;
-    if (exaData?.results?.length) {
-      setExaStatus({ count: exaData.results.length });
-    } else {
-      setExaStatus("error");
+    const exaSearchSucceeded = Boolean(exaData?.results?.length);
+    if (exaSearchSucceeded) {
+      setChatMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantPendingTurnId ? { ...msg, exaWebSearchSuccess: true } : msg
+        )
+      );
     }
     const exaContext = formatExaContext(exaData);
 
@@ -1706,7 +1706,6 @@ function App() {
     if (shouldAutoScrollRef.current) {
       window.requestAnimationFrame(() => scrollChatToBottom("smooth"));
     }
-    window.setTimeout(() => setExaStatus(null), 3500);
   };
 
   const handleComposerSubmit = async (event) => {
@@ -1855,20 +1854,23 @@ function App() {
           >
             <div className="chat-scroll">
               <div className="chat-spacer" aria-hidden="true" />
-              {chatMessages.map((message) => (
-                <article className={`chat-row ${message.role}`} key={message.id}>
-                  <div className={`chat-bubble ${message.role} ${message.pending ? "pending" : ""} ${message.error ? "error" : ""}`}>
-                    {message.pending && exaStatus ? (
-                      <div className="exa-status-row">
-                        <ExaStatusPill status={exaStatus} />
+              {chatMessages.map((message) => {
+                const isArtifactMessage = messageShouldRenderCsvArtifact(message);
+                return (
+                  <article
+                    className={`chat-row ${message.role} ${isArtifactMessage ? "artifact" : ""}`}
+                    key={message.id}
+                  >
+                    <div
+                      className={`chat-bubble ${message.role} ${message.pending ? "pending" : ""} ${message.error ? "error" : ""} ${isArtifactMessage ? "artifact" : ""}`}
+                    >
+                      <div className="chat-content">
+                        {renderMessageContent(message, { onOpenArtifact: handleOpenArtifactModal })}
                       </div>
-                    ) : null}
-                    <div className="chat-content">
-                      {renderMessageContent(message)}
                     </div>
-                  </div>
-                </article>
-              ))}
+                  </article>
+                );
+              })}
             </div>
           </section>
 
