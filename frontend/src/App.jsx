@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import DotWaveBackground from "./components/DotWaveBackground";
+import addIcon from "../assets/icons/add.svg";
 import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
+import dropdownIcon from "../assets/icons/dropdown.svg";
 
 const TITLE_TEXT = "Welcome to the Matrix.";
 const SCRAMBLE_CHARS =
@@ -23,10 +25,25 @@ const TYPING_SPEED_MS = 40;
 const DELETING_SPEED_MS = 24;
 const HOLD_AT_FULL_MS = 1500;
 const HOLD_BETWEEN_PROMPTS_MS = 360;
-const NOTICE_DURATION_MS = 2000;
-const NOTICE_FADE_MS = 450;
 const CHIP_REMOVE_ANIMATION_MS = 520;
 const CHIP_REPOSITION_ANIMATION_MS = 620;
+const CHAT_ENTER_TRANSITION_MS = 620;
+const COMPOSER_DOCK_ANIMATION_MS = 680;
+const THINKING_PLACEHOLDER_TEXT = "Thinking...";
+const CHAT_AUTO_SCROLL_THRESHOLD_PX = 40;
+const DEFAULT_PLANNER_MODEL_ENDPOINT =
+  "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server.modal.run";
+const PLANNER_MODEL_ENDPOINT =
+  import.meta.env.VITE_PLANNER_CONTEXT_ENDPOINT ||
+  import.meta.env.VITE_PLANNER_MODEL_ENDPOINT ||
+  DEFAULT_PLANNER_MODEL_ENDPOINT;
+const PLANNER_MODEL_ID = import.meta.env.VITE_PLANNER_MODEL_ID || "deepseek-r1";
+const PLANNER_API_KEY = import.meta.env.VITE_PLANNER_API_KEY || "";
+const PLANNER_DEV_PROXY_PATH = "/api/planner/chat";
+const USE_PLANNER_DEV_PROXY =
+  import.meta.env.DEV && import.meta.env.VITE_USE_PLANNER_PROXY !== "false";
+const PLANNER_CONTEXT_MAX_TOTAL_CHARS = 26000;
+const PLANNER_CONTEXT_MAX_FILE_CHARS = 5000;
 const TEXT_PREVIEW_EXTENSIONS = new Set([
   "txt",
   "md",
@@ -63,7 +80,6 @@ const ALLOWED_EXTENSIONS = new Set([
 ]);
 const MAX_TOTAL_FILES = 200;
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
-const PLANNER_CONTEXT_ENDPOINT = import.meta.env.VITE_PLANNER_CONTEXT_ENDPOINT || "/api/planner/context";
 
 function extensionFor(name) {
   const split = name.split(".");
@@ -101,6 +117,519 @@ function fileNameFromPath(path) {
   return segments.at(-1) || path;
 }
 
+function createRuntimeId(prefix) {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function plannerChatEndpointFor(baseOrEndpoint) {
+  const trimmed = (baseOrEndpoint || "").trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (trimmed.endsWith("/v1/chat/completions")) return trimmed;
+  return `${trimmed}/v1/chat/completions`;
+}
+
+function isTextContextFile(file) {
+  const extension = extensionFor(file.name);
+  return (file.type && file.type.startsWith("text/")) || TEXT_PREVIEW_EXTENSIONS.has(extension);
+}
+
+function parseInlineMarkdown(text, keyPrefix) {
+  if (!text) return [""];
+
+  const tokenRegex =
+    /(`[^`\n]+`|\*\*[^*\n][\s\S]*?\*\*|~~[^~\n][\s\S]*?~~|\*[^*\n][\s\S]*?\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))/g;
+  const nodes = [];
+  let cursor = 0;
+  let tokenIndex = 0;
+  let match = tokenRegex.exec(text);
+
+  while (match) {
+    const [rawToken] = match;
+    const start = match.index;
+
+    if (start > cursor) {
+      nodes.push(text.slice(cursor, start));
+    }
+
+    if (rawToken.startsWith("**") && rawToken.endsWith("**")) {
+      nodes.push(
+        <strong key={`${keyPrefix}-strong-${tokenIndex}`}>
+          {rawToken.slice(2, -2)}
+        </strong>
+      );
+    } else if (rawToken.startsWith("~~") && rawToken.endsWith("~~")) {
+      nodes.push(
+        <del key={`${keyPrefix}-del-${tokenIndex}`}>
+          {rawToken.slice(2, -2)}
+        </del>
+      );
+    } else if (rawToken.startsWith("*") && rawToken.endsWith("*")) {
+      nodes.push(
+        <em key={`${keyPrefix}-em-${tokenIndex}`}>
+          {rawToken.slice(1, -1)}
+        </em>
+      );
+    } else if (rawToken.startsWith("`") && rawToken.endsWith("`")) {
+      nodes.push(
+        <code key={`${keyPrefix}-code-${tokenIndex}`}>
+          {rawToken.slice(1, -1)}
+        </code>
+      );
+    } else if (rawToken.startsWith("[")) {
+      const linkMatch = rawToken.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+      if (linkMatch) {
+        nodes.push(
+          <a
+            key={`${keyPrefix}-link-${tokenIndex}`}
+            href={linkMatch[2]}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {linkMatch[1]}
+          </a>
+        );
+      } else {
+        nodes.push(rawToken);
+      }
+    } else {
+      nodes.push(rawToken);
+    }
+
+    cursor = start + rawToken.length;
+    tokenIndex += 1;
+    match = tokenRegex.exec(text);
+  }
+
+  if (cursor < text.length) {
+    nodes.push(text.slice(cursor));
+  }
+
+  return nodes;
+}
+
+function renderInlineWithBreaks(text, keyPrefix) {
+  const lines = text.split("\n");
+  const nodes = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    nodes.push(...parseInlineMarkdown(lines[i], `${keyPrefix}-line-${i}`));
+    if (i < lines.length - 1) {
+      nodes.push(<br key={`${keyPrefix}-br-${i}`} />);
+    }
+  }
+
+  return nodes;
+}
+
+function renderMarkdownBlocks(markdownText, keyPrefix) {
+  const lines = String(markdownText || "").replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  const unorderedItemPattern = /^\s*[-*+•]\s+/;
+  const orderedItemPattern = /^\s*\d+\.\s+/;
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      i += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith("```")) {
+      const language = trimmed.slice(3).trim();
+      i += 1;
+      const codeLines = [];
+      while (i < lines.length && !lines[i].trim().startsWith("```")) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1;
+      blocks.push(
+        <pre key={`${keyPrefix}-pre-${blocks.length}`} className="md-pre">
+          <code data-language={language || undefined}>{codeLines.join("\n")}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const headingText = headingMatch[2];
+      const HeadingTag = `h${level}`;
+      blocks.push(
+        <HeadingTag key={`${keyPrefix}-h-${blocks.length}`}>
+          {renderInlineWithBreaks(headingText, `${keyPrefix}-h-${blocks.length}`)}
+        </HeadingTag>
+      );
+      i += 1;
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+      blocks.push(<hr key={`${keyPrefix}-hr-${blocks.length}`} />);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quoteLines = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        quoteLines.push(lines[i].replace(/^\s*>\s?/, ""));
+        i += 1;
+      }
+      blocks.push(
+        <blockquote key={`${keyPrefix}-quote-${blocks.length}`}>
+          {renderInlineWithBreaks(quoteLines.join("\n"), `${keyPrefix}-quote-${blocks.length}`)}
+        </blockquote>
+      );
+      continue;
+    }
+
+    if (unorderedItemPattern.test(line)) {
+      const items = [];
+      while (i < lines.length && unorderedItemPattern.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[-*+•]\s+/, ""));
+        i += 1;
+      }
+      blocks.push(
+        <ul key={`${keyPrefix}-ul-${blocks.length}`}>
+          {items.map((item, index) => (
+            <li key={`${keyPrefix}-ul-item-${index}`}>
+              {renderInlineWithBreaks(item, `${keyPrefix}-ul-item-${index}`)}
+            </li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    if (orderedItemPattern.test(line)) {
+      const items = [];
+      while (i < lines.length) {
+        if (!orderedItemPattern.test(lines[i])) break;
+
+        const item = {
+          text: lines[i].replace(/^\s*\d+\.\s+/, ""),
+          bullets: []
+        };
+        i += 1;
+
+        while (i < lines.length && unorderedItemPattern.test(lines[i])) {
+          item.bullets.push(lines[i].replace(/^\s*[-*+•]\s+/, ""));
+          i += 1;
+        }
+
+        items.push(item);
+
+        if (i < lines.length && !orderedItemPattern.test(lines[i])) {
+          const lookaheadStart = i;
+          let lookahead = lookaheadStart;
+          while (lookahead < lines.length && !lines[lookahead].trim()) {
+            lookahead += 1;
+          }
+
+          if (lookahead < lines.length && orderedItemPattern.test(lines[lookahead])) {
+            i = lookahead;
+            continue;
+          }
+        }
+      }
+      blocks.push(
+        <ol key={`${keyPrefix}-ol-${blocks.length}`}>
+          {items.map((item, index) => (
+            <li key={`${keyPrefix}-ol-item-${index}`}>
+              {renderInlineWithBreaks(item.text, `${keyPrefix}-ol-item-${index}`)}
+              {item.bullets.length > 0 ? (
+                <ul>
+                  {item.bullets.map((bullet, bulletIndex) => (
+                    <li key={`${keyPrefix}-ol-item-${index}-bullet-${bulletIndex}`}>
+                      {renderInlineWithBreaks(
+                        bullet,
+                        `${keyPrefix}-ol-item-${index}-bullet-${bulletIndex}`
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    const paragraphLines = [line];
+    i += 1;
+    while (i < lines.length) {
+      const candidate = lines[i];
+      const candidateTrimmed = candidate.trim();
+      if (!candidateTrimmed) break;
+      if (
+        candidateTrimmed.startsWith("```") ||
+        /^(#{1,6})\s+/.test(candidate) ||
+        /^(-{3,}|\*{3,}|_{3,})$/.test(candidateTrimmed) ||
+        /^\s*>\s?/.test(candidate) ||
+        unorderedItemPattern.test(candidate) ||
+        orderedItemPattern.test(candidate)
+      ) {
+        break;
+      }
+      paragraphLines.push(candidate);
+      i += 1;
+    }
+
+    blocks.push(
+      <p key={`${keyPrefix}-p-${blocks.length}`}>
+        {renderInlineWithBreaks(paragraphLines.join("\n"), `${keyPrefix}-p-${blocks.length}`)}
+      </p>
+    );
+  }
+
+  return blocks;
+}
+
+function renderMarkdownContent(markdownText, keyPrefix) {
+  const nodes = renderMarkdownBlocks(markdownText, keyPrefix);
+  if (!nodes || (Array.isArray(nodes) && nodes.length === 0)) {
+    return <p>{markdownText}</p>;
+  }
+
+  return nodes;
+}
+
+function splitAssistantThinkContent(rawText, assumeUnclosedIsThinking = false) {
+  const normalized = String(rawText || "").replace(/\r\n/g, "\n");
+  const withoutOpenTags = normalized.replace(/<think\s*>/gi, "");
+  const closeMatch = /<\/think\s*>/i.exec(withoutOpenTags);
+
+  if (closeMatch) {
+    const thinkText = withoutOpenTags.slice(0, closeMatch.index).replace(/<\/think\s*>/gi, "");
+    const answerText = withoutOpenTags
+      .slice(closeMatch.index + closeMatch[0].length)
+      .replace(/<\/think\s*>/gi, "");
+    return {
+      hasCloseTag: true,
+      thinkText,
+      answerText
+    };
+  }
+
+  if (assumeUnclosedIsThinking) {
+    return {
+      hasCloseTag: false,
+      thinkText: withoutOpenTags.replace(/<\/think\s*>/gi, ""),
+      answerText: ""
+    };
+  }
+
+  return {
+    hasCloseTag: false,
+    thinkText: "",
+    answerText: withoutOpenTags.replace(/<\/think\s*>/gi, "")
+  };
+}
+
+function thoughtDurationLabel(durationSeconds) {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return "Thought for a moment.";
+  }
+
+  if (durationSeconds < 10) {
+    return `Thought for ${durationSeconds.toFixed(1)} seconds.`;
+  }
+
+  return `Thought for ${Math.round(durationSeconds)} seconds.`;
+}
+
+function ThinkDisclosure({ id, label, children }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div className={`chat-assistant-think-details ${isOpen ? "open" : ""}`}>
+      <button
+        type="button"
+        className="chat-assistant-think-summary"
+        aria-expanded={isOpen}
+        aria-controls={`${id}-think-panel`}
+        onClick={() => setIsOpen((prev) => !prev)}
+      >
+        <img className="chat-assistant-think-caret" src={dropdownIcon} alt="" />
+        <span>{label}</span>
+      </button>
+      <div className="chat-assistant-think-panel" id={`${id}-think-panel`} aria-hidden={!isOpen}>
+        <div className="chat-assistant-think-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function renderMessageContent(message) {
+  if (message.role !== "assistant") {
+    return renderMarkdownContent(message.content, message.id);
+  }
+
+  const messageText = String(message.content || "");
+  if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
+    return <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>;
+  }
+
+  const treatUnclosedAsThinking = Boolean(message.pending) || /<think\s*>/i.test(messageText);
+  const { thinkText, answerText } = splitAssistantThinkContent(messageText, treatUnclosedAsThinking);
+  const hasThinkText = thinkText.trim().length > 0;
+  const hasAnswerText = answerText.trim().length > 0;
+  const thinkLabel = message.pending
+    ? THINKING_PLACEHOLDER_TEXT
+    : thoughtDurationLabel(message.thinkingDurationSec);
+
+  if (!hasThinkText) {
+    return renderMarkdownContent(answerText || messageText, message.id);
+  }
+
+  return (
+    <>
+      <div className="chat-assistant-think-wrap">
+        <ThinkDisclosure id={message.id} label={thinkLabel}>
+          {renderMarkdownContent(thinkText, `${message.id}-think`)}
+        </ThinkDisclosure>
+      </div>
+      {hasAnswerText ? (
+        <div className="chat-assistant-answer">
+          {renderMarkdownContent(answerText, `${message.id}-answer`)}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function consumeSseDataEvents(buffer, onData) {
+  let remaining = buffer;
+  while (true) {
+    const eventBoundary = remaining.indexOf("\n\n");
+    if (eventBoundary === -1) break;
+
+    const eventBlock = remaining.slice(0, eventBoundary);
+    remaining = remaining.slice(eventBoundary + 2);
+
+    const lines = eventBlock.split("\n");
+    const dataLines = [];
+    for (const line of lines) {
+      if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+
+    if (dataLines.length > 0) {
+      onData(dataLines.join("\n"));
+    }
+  }
+
+  return remaining;
+}
+
+function extractStreamDelta(parsedEvent) {
+  const choice = parsedEvent?.choices?.[0];
+  if (!choice) return "";
+  if (typeof choice?.delta?.content === "string") return choice.delta.content;
+  if (typeof choice?.text === "string") return choice.text;
+  return "";
+}
+
+async function readPlannerResponseStream(response, onPartial) {
+  if (!response.body) {
+    throw new Error("Planner endpoint returned an empty stream.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let aggregatedText = "";
+
+  const consumeEventPayload = (payload) => {
+    if (!payload || payload === "[DONE]") return;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return;
+    }
+
+    const contentDelta = extractStreamDelta(parsed);
+    if (contentDelta) {
+      aggregatedText += contentDelta;
+      onPartial(aggregatedText);
+      return;
+    }
+
+    const fullContent = parsed?.choices?.[0]?.message?.content;
+    if (typeof fullContent === "string") {
+      aggregatedText = fullContent;
+      onPartial(aggregatedText);
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    buffer = consumeSseDataEvents(buffer, consumeEventPayload);
+  }
+
+  const tail = decoder.decode().replace(/\r\n/g, "\n");
+  if (tail) {
+    buffer += tail;
+  }
+  if (buffer) {
+    buffer = consumeSseDataEvents(buffer, consumeEventPayload);
+  }
+
+  return aggregatedText.trim();
+}
+
+async function buildPlannerContextBlock(files) {
+  if (files.length === 0) return "No external context files attached.";
+
+  let remainingChars = PLANNER_CONTEXT_MAX_TOTAL_CHARS;
+  const sections = [];
+
+  for (const { path, file } of files) {
+    const descriptor = `${path} (${fileLabel(file)}, ${formatBytes(file.size)})`;
+
+    if (!isTextContextFile(file)) {
+      sections.push(
+        `File: ${descriptor}\nContent: [Binary or non-text file attached; not inlined by browser client.]`
+      );
+      continue;
+    }
+
+    if (remainingChars <= 0) {
+      sections.push(`File: ${descriptor}\nContent: [Omitted due to context size budget.]`);
+      continue;
+    }
+
+    try {
+      const rawText = await file.text();
+      const normalized = rawText.replace(/\r\n/g, "\n");
+      const allowedChars = Math.min(PLANNER_CONTEXT_MAX_FILE_CHARS, remainingChars);
+      const excerpt = normalized.slice(0, allowedChars);
+      remainingChars -= excerpt.length;
+      const truncatedSuffix = normalized.length > excerpt.length ? "\n...[truncated]" : "";
+      sections.push(`File: ${descriptor}\nContent:\n\`\`\`\n${excerpt}${truncatedSuffix}\n\`\`\``);
+    } catch (error) {
+      sections.push(`File: ${descriptor}\nContent: [Failed to read file in browser.]`);
+    }
+  }
+
+  return sections.join("\n\n");
+}
+
 function App() {
   const [displayTitle, setDisplayTitle] = useState(TITLE_TEXT);
   const [showSubtitle, setShowSubtitle] = useState(false);
@@ -111,26 +640,142 @@ function App() {
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
-  const [uploadNotice, setUploadNotice] = useState("");
-  const [showUploadNotice, setShowUploadNotice] = useState(false);
-  const [submitNotice, setSubmitNotice] = useState({ kind: "idle", message: "" });
-  const [showSubmitNotice, setShowSubmitNotice] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isChatMode, setIsChatMode] = useState(false);
+  const [isHeroCompacted, setIsHeroCompacted] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
   const [placeholderText, setPlaceholderText] = useState(
     examplePrompts[0].startsWith(SHARED_PREFIX) ? SHARED_PREFIX : ""
   );
+  const [isPlaceholderTypingActive, setIsPlaceholderTypingActive] = useState(true);
   const [promptIndex, setPromptIndex] = useState(0);
   const [isDeleting, setIsDeleting] = useState(false);
   const [removingContextIds, setRemovingContextIds] = useState(() => new Set());
   const fileInputRef = useRef(null);
+  const chatScrollRef = useRef(null);
+  const composerShellRef = useRef(null);
+  const heroCopyRef = useRef(null);
   const contextFilesRef = useRef(contextFiles);
   const removeTimersRef = useRef(new Map());
   const contextChipRefs = useRef(new Map());
   const previousChipPositionsRef = useRef(new Map());
+  const composerStartRectRef = useRef(null);
+  const wasHeroCompactedRef = useRef(false);
+  const shouldAutoScrollRef = useRef(true);
 
   useEffect(() => {
     contextFilesRef.current = contextFiles;
   }, [contextFiles]);
+
+  const isChatActive = isChatMode;
+  const updateAutoScrollLock = () => {
+    const chatNode = chatScrollRef.current;
+    if (!chatNode) return;
+
+    const distanceFromBottom =
+      chatNode.scrollHeight - (chatNode.scrollTop + chatNode.clientHeight);
+    shouldAutoScrollRef.current = distanceFromBottom <= CHAT_AUTO_SCROLL_THRESHOLD_PX;
+  };
+
+  const scrollChatToBottom = (behavior = "smooth") => {
+    const chatNode = chatScrollRef.current;
+    if (!chatNode) return;
+    shouldAutoScrollRef.current = true;
+    chatNode.scrollTo({
+      top: chatNode.scrollHeight,
+      behavior
+    });
+  };
+
+  const handleChatThreadScroll = () => {
+    updateAutoScrollLock();
+  };
+
+  useEffect(() => {
+    if (!isChatMode) {
+      setIsHeroCompacted(false);
+      return undefined;
+    }
+
+    const heroCopyNode = heroCopyRef.current;
+    if (!heroCopyNode) {
+      setIsHeroCompacted(true);
+      return undefined;
+    }
+
+    const handleTransitionEnd = (event) => {
+      if (event.target !== heroCopyNode || event.propertyName !== "opacity") return;
+      setIsHeroCompacted(true);
+    };
+
+    heroCopyNode.addEventListener("transitionend", handleTransitionEnd);
+
+    return () => {
+      heroCopyNode.removeEventListener("transitionend", handleTransitionEnd);
+    };
+  }, [isChatMode]);
+
+  useLayoutEffect(() => {
+    const enteringDockedLayout = isHeroCompacted && !wasHeroCompactedRef.current;
+    if (!enteringDockedLayout) {
+      wasHeroCompactedRef.current = isHeroCompacted;
+      return;
+    }
+
+    const shellNode = composerShellRef.current;
+    const startRect = composerStartRectRef.current;
+    if (!shellNode || !startRect) {
+      wasHeroCompactedRef.current = isHeroCompacted;
+      return;
+    }
+
+    const endRect = shellNode.getBoundingClientRect();
+    const deltaX = startRect.left - endRect.left;
+    const deltaY = startRect.top - endRect.top;
+
+    shellNode.animate(
+      [
+        { transform: `translate(-50%, 0) translate(${deltaX}px, ${deltaY}px)` },
+        { transform: "translate(-50%, 0) translate(0, 0)" }
+      ],
+      {
+        duration: COMPOSER_DOCK_ANIMATION_MS,
+        easing: "cubic-bezier(0.68, -0.38, 0.22, 1.28)",
+        fill: "both"
+      }
+    );
+
+    composerStartRectRef.current = null;
+    wasHeroCompactedRef.current = isHeroCompacted;
+  }, [isHeroCompacted]);
+
+  useEffect(() => {
+    if (!isChatActive || !isHeroCompacted || !shouldAutoScrollRef.current) return;
+    const scrollToBottom = () => scrollChatToBottom("smooth");
+    let delayedRafId = 0;
+    const rafId = window.requestAnimationFrame(scrollToBottom);
+    const timeoutId = window.setTimeout(() => {
+      delayedRafId = window.requestAnimationFrame(scrollToBottom);
+    }, 120);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      if (delayedRafId) {
+        window.cancelAnimationFrame(delayedRafId);
+      }
+      window.clearTimeout(timeoutId);
+    };
+  }, [chatMessages, isChatActive, isHeroCompacted]);
+
+  useEffect(() => {
+    if (!isChatActive || !isHeroCompacted) return;
+    shouldAutoScrollRef.current = true;
+    const rafId = window.requestAnimationFrame(() => {
+      scrollChatToBottom("auto");
+    });
+    return () => {
+      window.cancelAnimationFrame(rafId);
+    };
+  }, [isChatActive, isHeroCompacted]);
 
   useLayoutEffect(() => {
     const chipNodes = contextChipRefs.current;
@@ -179,46 +824,6 @@ function App() {
       removeTimersRef.current.clear();
     };
   }, []);
-
-  useEffect(() => {
-    if (!uploadNotice) {
-      setShowUploadNotice(false);
-      return undefined;
-    }
-
-    setShowUploadNotice(true);
-    const fadeTimer = window.setTimeout(() => {
-      setShowUploadNotice(false);
-    }, Math.max(0, NOTICE_DURATION_MS - NOTICE_FADE_MS));
-    const clearTimer = window.setTimeout(() => {
-      setUploadNotice("");
-    }, NOTICE_DURATION_MS);
-
-    return () => {
-      window.clearTimeout(fadeTimer);
-      window.clearTimeout(clearTimer);
-    };
-  }, [uploadNotice]);
-
-  useEffect(() => {
-    if (submitNotice.kind === "idle" || !submitNotice.message) {
-      setShowSubmitNotice(false);
-      return undefined;
-    }
-
-    setShowSubmitNotice(true);
-    const fadeTimer = window.setTimeout(() => {
-      setShowSubmitNotice(false);
-    }, Math.max(0, NOTICE_DURATION_MS - NOTICE_FADE_MS));
-    const clearTimer = window.setTimeout(() => {
-      setSubmitNotice({ kind: "idle", message: "" });
-    }, NOTICE_DURATION_MS);
-
-    return () => {
-      window.clearTimeout(fadeTimer);
-      window.clearTimeout(clearTimer);
-    };
-  }, [submitNotice]);
 
   useEffect(() => {
     if (!previewTarget) {
@@ -368,6 +973,8 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!isPlaceholderTypingActive) return undefined;
+
     const currentPrompt = examplePrompts[promptIndex];
     const retainedPrefixLength = currentPrompt.startsWith(SHARED_PREFIX) ? SHARED_PREFIX.length : 0;
     let delay = isDeleting ? DELETING_SPEED_MS : TYPING_SPEED_MS;
@@ -401,7 +1008,7 @@ function App() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [isDeleting, placeholderText, promptIndex]);
+  }, [isDeleting, placeholderText, promptIndex, isPlaceholderTypingActive]);
 
   const addContextFiles = (files) => {
     const incoming = Array.from(files);
@@ -453,18 +1060,6 @@ function App() {
     const nextFiles = [...previousFiles, ...accepted];
     contextFilesRef.current = nextFiles;
     setContextFiles(nextFiles);
-
-    const messages = [];
-    if (accepted.length > 0) {
-      messages.push(`Added ${accepted.length} file(s).`);
-    }
-    if (duplicateCount > 0) {
-      messages.push(`Skipped ${duplicateCount} duplicates.`);
-    }
-    if (rejected.length > 0) {
-      messages.push(`Skipped ${rejected.length} unsupported/invalid file(s).`);
-    }
-    setUploadNotice(messages.join(" "));
   };
 
   const handleFilePickerChange = (event) => {
@@ -502,66 +1097,182 @@ function App() {
   const handleComposerSubmit = async (event) => {
     event.preventDefault();
     const filesForSubmit = contextFiles.filter((file) => !removingContextIds.has(file.id));
+    const promptText = scenarioText.trim();
 
-    if (!scenarioText.trim() && filesForSubmit.length === 0) {
-      setSubmitNotice({
-        kind: "warning",
-        message: "Add a prompt or at least one context file before submitting."
-      });
+    if (!promptText && filesForSubmit.length === 0) {
       return;
     }
 
-    setIsSubmitting(true);
-    setSubmitNotice({ kind: "idle", message: "" });
+    if (isPlaceholderTypingActive) {
+      setIsPlaceholderTypingActive(false);
+      setPlaceholderText(SHARED_PREFIX);
+    }
 
-    const formData = new FormData();
-    formData.append("prompt", scenarioText.trim());
-    formData.append(
-      "context_manifest",
-      JSON.stringify(
-        filesForSubmit.map(({ path, file }) => ({
-          path,
-          name: file.name,
-          type: file.type || "application/octet-stream",
-          size: file.size
-        }))
-      )
-    );
-    filesForSubmit.forEach(({ file, path }) => {
-      formData.append("context_files", file, path);
-    });
+    setIsSubmitting(true);
 
     try {
-      const response = await fetch(PLANNER_CONTEXT_ENDPOINT, {
+      if (!isChatMode) {
+        if (composerShellRef.current) {
+          composerStartRectRef.current = composerShellRef.current.getBoundingClientRect();
+        }
+        setIsChatMode(true);
+        await new Promise((resolve) => {
+          window.setTimeout(resolve, CHAT_ENTER_TRANSITION_MS);
+        });
+      }
+
+      const userTurn = {
+        id: createRuntimeId("user"),
+        role: "user",
+        content: promptText || "[No prompt provided]"
+      };
+      const assistantPendingTurnId = createRuntimeId("assistant");
+
+      setChatMessages((prev) => [
+        ...prev,
+        userTurn,
+        {
+          id: assistantPendingTurnId,
+          role: "assistant",
+          content: THINKING_PLACEHOLDER_TEXT,
+          pending: true,
+          startedAtMs: Date.now()
+        }
+      ]);
+      window.requestAnimationFrame(() => {
+        scrollChatToBottom("smooth");
+      });
+      setScenarioText("");
+
+      const plannerContext = await buildPlannerContextBlock(filesForSubmit);
+      const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
+      const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
+      if (!plannerRequestUrl) {
+        throw new Error("Planner endpoint is not configured.");
+      }
+
+      const payload = {
+        model: PLANNER_MODEL_ID,
+        temperature: 0.2,
+        stream: true,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a simulation planner assistant. Use provided prompt + context files to draft planning assumptions and key demographic factors."
+          },
+          {
+            role: "user",
+            content:
+              `Simulation request:\n${promptText || "[No prompt provided]"}\n\n` +
+              `Attached context (${filesForSubmit.length} file(s)):\n${plannerContext}`
+          }
+        ]
+      };
+
+      const response = await fetch(plannerRequestUrl, {
         method: "POST",
-        body: formData
+        headers: {
+          "Content-Type": "application/json",
+          ...(!USE_PLANNER_DEV_PROXY && PLANNER_API_KEY
+            ? { Authorization: `Bearer ${PLANNER_API_KEY}` }
+            : {})
+        },
+        body: JSON.stringify(payload)
       });
 
       if (!response.ok) {
-        throw new Error(`Planner endpoint responded ${response.status}`);
+        let detail = "";
+        try {
+          detail = await response.text();
+        } catch (error) {
+          detail = "";
+        }
+        const shortDetail = detail ? `: ${detail.slice(0, 220)}` : "";
+        throw new Error(`Planner endpoint responded ${response.status}${shortDetail}`);
       }
 
-      setSubmitNotice({
-        kind: "success",
-        message: `Submitted prompt + ${filesForSubmit.length} context file(s) to the planner.`
-      });
+      const responseContentType = response.headers.get("content-type") || "";
+      let plannerText = "";
+
+      if (responseContentType.includes("text/event-stream")) {
+        plannerText = await readPlannerResponseStream(response, (partialText) => {
+          setChatMessages((prev) =>
+            prev.map((message) =>
+              message.id === assistantPendingTurnId
+                ? {
+                    ...message,
+                    content: partialText || THINKING_PLACEHOLDER_TEXT,
+                    pending: true
+                  }
+                : message
+            )
+          );
+        });
+      } else {
+        const plannerResponse = await response.json();
+        plannerText = plannerResponse?.choices?.[0]?.message?.content || "";
+      }
+
+      if (!plannerText) {
+        throw new Error("Planner endpoint returned no completion content.");
+      }
+
+      const completionTimeMs = Date.now();
+      setChatMessages((prev) =>
+        prev.map((message) =>
+          message.id === assistantPendingTurnId
+            ? {
+                ...message,
+                content: plannerText,
+                pending: false,
+                thinkingDurationSec: Math.max(
+                  0.1,
+                  (completionTimeMs -
+                    (typeof message.startedAtMs === "number" ? message.startedAtMs : completionTimeMs)) /
+                    1000
+                )
+              }
+            : message
+        )
+      );
+      if (shouldAutoScrollRef.current) {
+        window.requestAnimationFrame(() => {
+          scrollChatToBottom("smooth");
+        });
+      }
+
     } catch (error) {
-      setSubmitNotice({
-        kind: "warning",
-        message:
-          `Could not reach planner endpoint (${PLANNER_CONTEXT_ENDPOINT}). ` +
-          "Context files remain attached locally."
-      });
+      const failureTimeMs = Date.now();
+      setChatMessages((prev) =>
+        prev.map((message) =>
+          message.id === assistantPendingTurnId
+            ? {
+                ...message,
+                content:
+                  `Planner request failed: ${error.message || "Unknown error occurred."}\n` +
+                  "Please verify endpoint/model configuration and try again.",
+                pending: false,
+                error: true,
+                thinkingDurationSec: Math.max(
+                  0.1,
+                  (failureTimeMs -
+                    (typeof message.startedAtMs === "number" ? message.startedAtMs : failureTimeMs)) /
+                    1000
+                )
+              }
+            : message
+        )
+      );
+      if (shouldAutoScrollRef.current) {
+        window.requestAnimationFrame(() => {
+          scrollChatToBottom("smooth");
+        });
+      }
     } finally {
       setIsSubmitting(false);
     }
   };
-
-  const hasSubmitNotice = submitNotice.kind !== "idle" && Boolean(submitNotice.message);
-  const hasUploadNotice = Boolean(uploadNotice);
-  const activeNoticeMessage = hasSubmitNotice ? submitNotice.message : hasUploadNotice ? uploadNotice : "";
-  const activeNoticeVisible = hasSubmitNotice ? showSubmitNotice : hasUploadNotice ? showUploadNotice : false;
-  const activeNoticeKind = hasSubmitNotice ? submitNotice.kind : "";
 
   return (
     <div className="app-shell">
@@ -577,13 +1288,45 @@ function App() {
       />
 
       <main className="main-panel">
-        <section className="hero">
-          <div className="hero-copy">
+        <section
+          className={`hero ${isHeroCompacted ? "chat-active" : ""} ${
+            isHeroCompacted && contextFiles.length > 0 ? "chat-active-with-context" : ""
+          }`}
+        >
+          <div
+            ref={heroCopyRef}
+            className={`hero-copy ${isChatActive ? "hidden" : ""} ${isHeroCompacted ? "collapsed" : ""}`}
+          >
             <h1>{displayTitle}</h1>
             <p className={`hero-subtitle ${showSubtitle ? "visible" : ""}`}>Simulate Anything</p>
           </div>
 
-          <form className="composer-shell" onSubmit={handleComposerSubmit}>
+          <section
+            className={`chat-thread ${isHeroCompacted ? "visible" : "hidden"}`}
+            aria-live="polite"
+            aria-hidden={!isHeroCompacted}
+            ref={chatScrollRef}
+            onScroll={handleChatThreadScroll}
+          >
+            <div className="chat-scroll">
+              <div className="chat-spacer" aria-hidden="true" />
+              {chatMessages.map((message) => (
+                <article className={`chat-row ${message.role}`} key={message.id}>
+                  <div className={`chat-bubble ${message.role} ${message.pending ? "pending" : ""} ${message.error ? "error" : ""}`}>
+                    <div className="chat-content">
+                      {renderMessageContent(message)}
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <form
+            ref={composerShellRef}
+            className={`composer-shell ${isHeroCompacted ? "chat-docked" : ""}`}
+            onSubmit={handleComposerSubmit}
+          >
             <div className={`composer-frame ${contextFiles.length > 0 ? "with-context" : ""}`}>
               <div
                 className={`context-preview-wrapper ${contextFiles.length > 0 ? "visible" : "hidden"}`}
@@ -652,7 +1395,7 @@ function App() {
                     fileInputRef.current?.click();
                   }}
                 >
-                  +
+                  <img src={addIcon} alt="" />
                 </button>
                 <input
                   type="text"
@@ -666,13 +1409,6 @@ function App() {
                 </button>
               </div>
             </div>
-
-            <p
-              className={`context-note ${activeNoticeKind} ${activeNoticeVisible ? "visible" : "hidden"}`}
-              aria-live={activeNoticeMessage ? "polite" : "off"}
-            >
-              {activeNoticeMessage || "\u00A0"}
-            </p>
           </form>
         </section>
       </main>
