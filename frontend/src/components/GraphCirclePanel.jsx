@@ -165,7 +165,51 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function GraphCirclePanel({ graph = null }) {
+function SimulationJourney({ data }) {
+  if (!data || !data.days || data.days.length === 0) return null;
+
+  const [expandedDay, setExpandedDay] = useState(-1);
+
+  return (
+    <div className="sim-journey">
+      <div className="sim-journey-header">Simulation Journey</div>
+
+      <div className="sim-section">
+        <div className="sim-section-label">Initial Reaction (Day 0)</div>
+        <div className="sim-section-text">{data.initial}</div>
+      </div>
+
+      {data.days.length > 2 && (
+        <div className="sim-section">
+          <div className="sim-section-label">Evolution</div>
+          <div className="sim-day-list">
+            {data.days.slice(1, -1).map((d) => (
+              <button
+                key={d.day}
+                className={`sim-day-chip ${expandedDay === d.day ? "active" : ""}`}
+                onClick={() => setExpandedDay(expandedDay === d.day ? -1 : d.day)}
+              >
+                Day {d.day + 1}
+              </button>
+            ))}
+          </div>
+          {expandedDay >= 0 && (
+            <div className="sim-day-expanded">
+              {data.days.find((d) => d.day === expandedDay)?.content || ""}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="sim-section final">
+        <div className="sim-section-label">Final Position (Day {data.days.length})</div>
+        <div className="sim-section-text">{data.final}</div>
+      </div>
+    </div>
+  );
+}
+
+function GraphCirclePanel({ graph = null, simulationData = null, simulationStatus = null, onRunSimulation = null }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const selectedNodeIdRef = useRef("");
   const zoomScaleRef = useRef(1);
@@ -547,24 +591,69 @@ function GraphCirclePanel({ graph = null }) {
         ) : null}
         <canvas ref={canvasRef} className="graph-circle-canvas-element" />
       </div>
+
       {selectedNodeId ? (
-        <div className="graph-node-inspector active">
-          <dl className="graph-node-inspector-grid">
-            {detailTargetRows.map((row, index) =>
-              row.label === "__name__" ? (
-                <div className="graph-node-inspector-row name" key={`name-${index}`}>
-                  <dd className="graph-node-inspector-name">{row.value}</dd>
-                </div>
-              ) : (
-                <div className="graph-node-inspector-row" key={`${row.label}-${index}`}>
-                  <dt className="graph-node-inspector-label">{row.label}</dt>
-                  <dd className="graph-node-inspector-value">{row.value}</dd>
-                </div>
-              )
-            )}
-          </dl>
+        <div className="sim-modal-overlay" onClick={() => setSelectedNodeId("")}>
+          <div className="sim-modal" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="sim-modal-close"
+              onClick={() => setSelectedNodeId("")}
+            >
+              &times;
+            </button>
+            <div className="sim-modal-body">
+              <dl className="graph-node-inspector-grid">
+                {detailTargetRows.map((row, index) =>
+                  row.label === "__name__" ? (
+                    <div className="graph-node-inspector-row name" key={`name-${index}`}>
+                      <dd className="graph-node-inspector-name">{row.value}</dd>
+                    </div>
+                  ) : (
+                    <div className="graph-node-inspector-row" key={`${row.label}-${index}`}>
+                      <dt className="graph-node-inspector-label">{row.label}</dt>
+                      <dd className="graph-node-inspector-value">{row.value}</dd>
+                    </div>
+                  )
+                )}
+              </dl>
+              {simulationData && simulationData[selectedNodeId] ? (
+                <SimulationJourney data={simulationData[selectedNodeId]} />
+              ) : null}
+            </div>
+          </div>
         </div>
       ) : null}
+
+      <div className="sim-controls">
+        {simulationStatus?.state === "running" ? (
+          <div className="sim-progress">
+            <span className="sim-progress-label">
+              Simulating day {(simulationStatus.day || 0) + 1}/{simulationStatus.total ? Math.round(simulationStatus.total / 12) : "?"}
+            </span>
+            <div className="sim-progress-bar">
+              <div
+                className="sim-progress-fill"
+                style={{
+                  width: simulationStatus.total
+                    ? `${Math.round((simulationStatus.progress / simulationStatus.total) * 100)}%`
+                    : "0%",
+                }}
+              />
+            </div>
+          </div>
+        ) : simulationStatus?.state === "done" ? (
+          <div className="sim-done-label">Simulation complete — click an agent</div>
+        ) : simulationStatus?.state === "error" ? (
+          <button type="button" className="sim-run-btn error" onClick={onRunSimulation}>
+            Error — Retry Simulation
+          </button>
+        ) : onRunSimulation ? (
+          <button type="button" className="sim-run-btn" onClick={onRunSimulation}>
+            Run Simulation
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }

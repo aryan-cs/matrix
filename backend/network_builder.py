@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -11,7 +12,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import httpx
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -793,3 +795,210 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
         session_id=session_id,
         system_prompt=agent.get("system_prompt", ""),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Simulation: 5-day agent communication with Supermemory persistence
+# ──────────────────────────────────────────────────────────────────────────────
+
+SUPERMEMORY_API_KEY = os.getenv("SUPERMEMORY_API_KEY", "").strip()
+SUPERMEMORY_BASE_URL = "https://api.supermemory.ai"
+SIMULATION_GRAPH_PATH = Path(__file__).resolve().parent / "graph.json"
+SIMULATION_DAYS = 5
+SIMULATION_NEWS_SPARK = (
+    "BREAKING: A leaked Texas legislative proposal suggests a 20% tax credit "
+    "for small businesses, offset by a 5% tax hike on luxury properties over $2M."
+)
+SIMULATION_MODAL_ENDPOINT = os.getenv(
+    "SIM_MODAL_ENDPOINT",
+    "https://matrix--deepseek-r1-1p5b-deepseekserver-openai-server.modal.run",
+).strip().rstrip("/") + "/v1/chat/completions"
+
+_sim_status: dict = {"state": "idle", "progress": 0, "total": 0, "day": 0, "error": ""}
+_sim_results: dict = {}
+
+
+async def _store_supermemory(agent_id: str, day: int, content: str) -> None:
+    """Store an agent's daily thought into Supermemory for persistence."""
+    if not SUPERMEMORY_API_KEY:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await client.post(
+                f"{SUPERMEMORY_BASE_URL}/v1/memories",
+                headers={
+                    "Authorization": f"Bearer {SUPERMEMORY_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "content": f"[Agent {agent_id} | Day {day}]\n{content}",
+                    "metadata": {"agent_id": agent_id, "day": str(day)},
+                },
+            )
+    except Exception:
+        pass
+
+
+async def _call_sim_agent(
+    agent_id: str,
+    system_prompt: str,
+    incoming_messages: list[str],
+) -> str:
+    """Call the DeepSeek LLM for one agent turn in the simulation."""
+    first_name = agent_id
+    if "You are " in system_prompt:
+        full_name = system_prompt.split("You are ", 1)[1].split(",")[0].strip()
+        first_name = full_name.split()[0]
+
+    if len(incoming_messages) == 1:
+        user_content = f'Your neighbor just shared: "{incoming_messages[0]}"'
+    else:
+        msgs = "\n".join(f'- "{m[:200]}"' for m in incoming_messages[:5])
+        user_content = f"Your neighbors have been talking:\n{msgs}\nWhat's your take?"
+
+    payload = {
+        "model": "deepseek-r1",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"{system_prompt}\n\n"
+                    f"Speak as {first_name} in first person ('I', 'me', 'my'). "
+                    f"Never say your own name. Never narrate. "
+                    f"Respond in 2-3 sentences only."
+                ),
+            },
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.9,
+        "max_tokens": 512,
+    }
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        try:
+            resp = await client.post(SIMULATION_MODAL_ENDPOINT, json=payload)
+            content = resp.json()["choices"][0]["message"]["content"]
+            if "</think>" in content:
+                content = content.split("</think>", 1)[1].strip()
+            return content.strip()
+        except Exception as exc:
+            return f"[{agent_id} unavailable: {exc}]"
+
+
+async def _run_simulation_task() -> None:
+    """Background task: run the full 5-day simulation."""
+    global _sim_status, _sim_results
+
+    try:
+        if not SIMULATION_GRAPH_PATH.exists():
+            _sim_status = {
+                "state": "error", "progress": 0, "total": 0, "day": 0,
+                "error": "graph.json not found",
+            }
+            return
+
+        graph = json.loads(SIMULATION_GRAPH_PATH.read_text(encoding="utf-8"))
+        nodes = graph.get("nodes", [])
+        agent_map = {n["id"]: n for n in nodes}
+        all_ids = [n["id"] for n in nodes]
+
+        results: dict[str, list[dict]] = {aid: [] for aid in all_ids}
+        current_messages: dict[str, str] = {}
+        total_steps = SIMULATION_DAYS * len(all_ids)
+        done = 0
+        _sim_status = {
+            "state": "running", "progress": 0, "total": total_steps, "day": 0, "error": "",
+        }
+
+        for day in range(SIMULATION_DAYS):
+            _sim_status["day"] = day
+
+            tasks = []
+            task_ids = []
+
+            for agent_id in all_ids:
+                agent = agent_map[agent_id]
+                system_prompt = agent["metadata"].get("system_prompt", "")
+                neighbors = agent.get("connections", [])
+
+                if day == 0:
+                    incoming = [SIMULATION_NEWS_SPARK]
+                else:
+                    incoming = [
+                        current_messages[nid]
+                        for nid in neighbors
+                        if nid in current_messages
+                    ]
+                    if not incoming:
+                        incoming = [current_messages.get(agent_id, SIMULATION_NEWS_SPARK)]
+
+                tasks.append(_call_sim_agent(agent_id, system_prompt, incoming))
+                task_ids.append(agent_id)
+
+            responses = await asyncio.gather(*tasks)
+
+            next_messages: dict[str, str] = {}
+            memory_tasks = []
+            for agent_id, response in zip(task_ids, responses):
+                next_messages[agent_id] = response
+                results[agent_id].append({"day": day, "content": response})
+                memory_tasks.append(_store_supermemory(agent_id, day, response))
+                done += 1
+
+            _sim_status["progress"] = done
+            await asyncio.gather(*memory_tasks)
+            current_messages = next_messages
+
+        _sim_results = {}
+        for agent_id in all_ids:
+            meta = agent_map[agent_id]["metadata"]
+            days_data = results[agent_id]
+            _sim_results[agent_id] = {
+                "agent_id": agent_id,
+                "full_name": meta.get("full_name", agent_id),
+                "segment_key": meta.get("segment_key", ""),
+                "days": days_data,
+                "initial": days_data[0]["content"] if days_data else "",
+                "final": days_data[-1]["content"] if days_data else "",
+            }
+
+        _sim_status = {
+            "state": "done", "progress": total_steps, "total": total_steps,
+            "day": SIMULATION_DAYS, "error": "",
+        }
+
+    except Exception as exc:
+        _sim_status = {
+            "state": "error", "progress": 0, "total": 0, "day": 0, "error": str(exc),
+        }
+
+
+@app.post("/api/simulation/run")
+async def simulation_run(background_tasks: BackgroundTasks):
+    global _sim_status, _sim_results
+    if _sim_status["state"] == "running":
+        return {"status": "already_running"}
+    _sim_status = {"state": "running", "progress": 0, "total": 0, "day": 0, "error": ""}
+    _sim_results = {}
+    background_tasks.add_task(_run_simulation_task)
+    return {"status": "started"}
+
+
+@app.get("/api/simulation/status")
+async def simulation_status():
+    return _sim_status
+
+
+@app.get("/api/simulation/results")
+async def simulation_results():
+    if _sim_status["state"] != "done":
+        raise HTTPException(status_code=425, detail="Simulation not complete yet.")
+    return _sim_results
+
+
+@app.get("/api/simulation/graph")
+async def simulation_graph():
+    """Serve the pre-built graph.json to the frontend."""
+    if not SIMULATION_GRAPH_PATH.exists():
+        raise HTTPException(status_code=404, detail="graph.json not found.")
+    return json.loads(SIMULATION_GRAPH_PATH.read_text(encoding="utf-8"))

@@ -212,6 +212,198 @@ input {
   font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
+/* ── Simulation modal overlay ── */
+.sim-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+}
+
+.sim-modal {
+  position: relative;
+  width: min(92vw, 520px);
+  max-height: 80vh;
+  background: rgba(18, 18, 18, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.sim-modal-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 1.3rem;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.sim-modal-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.sim-modal-body {
+  padding: 20px 24px 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* ── Simulation journey ── */
+.sim-journey {
+  margin-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 14px;
+}
+
+.sim-journey-header {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.9);
+  margin-bottom: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.sim-section {
+  margin-bottom: 12px;
+}
+
+.sim-section.final {
+  margin-bottom: 0;
+}
+
+.sim-section-label {
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.55);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+}
+
+.sim-section-text {
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.92);
+  line-height: 1.45;
+}
+
+.sim-day-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  margin-bottom: 6px;
+}
+
+.sim-day-chip {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sim-day-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sim-day-chip.active {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.sim-day-expanded {
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.88);
+  line-height: 1.4;
+}
+
+/* ── Simulation controls ── */
+.sim-controls {
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+}
+
+.sim-run-btn {
+  padding: 6px 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.sim-run-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.sim-run-btn.error {
+  border-color: rgba(255, 80, 80, 0.4);
+  color: rgba(255, 120, 120, 0.95);
+}
+
+.sim-progress {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sim-progress-label {
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.6);
+  text-align: center;
+}
+
+.sim-progress-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.sim-progress-fill {
+  height: 100%;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.sim-done-label {
+  font-size: 0.76rem;
+  color: rgba(255, 255, 255, 0.55);
+  text-align: center;
+}
+
 @keyframes graph-panel-sling-in {
   0% {
     opacity: 0;

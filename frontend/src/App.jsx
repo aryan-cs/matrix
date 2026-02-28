@@ -1467,6 +1467,9 @@ function App() {
   const [graphPanelGraph, setGraphPanelGraph] = useState(null);
   const [graphPanelWidth, setGraphPanelWidth] = useState(GRAPH_PANEL_DEFAULT_WIDTH);
   const [isGraphPanelResizing, setIsGraphPanelResizing] = useState(false);
+  const [simulationData, setSimulationData] = useState(null);
+  const [simulationStatus, setSimulationStatus] = useState(null);
+  const simulationPollRef = useRef(null);
   const [chatMessages, setChatMessages] = useState([]);
   const [placeholderText, setPlaceholderText] = useState(
     examplePrompts[0].startsWith(SHARED_PREFIX) ? SHARED_PREFIX : ""
@@ -1706,6 +1709,48 @@ function App() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerStop);
       window.removeEventListener("pointercancel", handlePointerStop);
+    };
+  }, []);
+
+  const handleRunSimulation = async () => {
+    if (simulationStatus?.state === "running") return;
+    setSimulationData(null);
+    setSimulationStatus({ state: "running", progress: 0, total: 0, day: 0 });
+
+    try {
+      await fetch("/api/simulation/run", { method: "POST" });
+    } catch {
+      setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: "Network error" });
+      return;
+    }
+
+    if (simulationPollRef.current) clearInterval(simulationPollRef.current);
+    simulationPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch("/api/simulation/status");
+        const status = await res.json();
+        setSimulationStatus(status);
+
+        if (status.state === "done") {
+          clearInterval(simulationPollRef.current);
+          simulationPollRef.current = null;
+          const resultsRes = await fetch("/api/simulation/results");
+          if (resultsRes.ok) {
+            setSimulationData(await resultsRes.json());
+          }
+        } else if (status.state === "error") {
+          clearInterval(simulationPollRef.current);
+          simulationPollRef.current = null;
+        }
+      } catch {
+        /* keep polling */
+      }
+    }, 2000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (simulationPollRef.current) clearInterval(simulationPollRef.current);
     };
   }, []);
 
@@ -2586,7 +2631,12 @@ function App() {
 
       <aside className={`graph-panel-shell ${isGraphPanelOpen ? "open" : ""}`} aria-hidden={!isGraphPanelOpen}>
         <section className="graph-panel" aria-label="Network graph panel">
-          <GraphCirclePanel graph={graphPanelGraph} />
+          <GraphCirclePanel
+            graph={graphPanelGraph}
+            simulationData={simulationData}
+            simulationStatus={simulationStatus}
+            onRunSimulation={handleRunSimulation}
+          />
         </section>
         <button
           type="button"
