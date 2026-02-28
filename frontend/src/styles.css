@@ -815,6 +815,7 @@ input {
   margin-top: 0.24rem;
   font-size: 0.84rem;
   font-weight: 500;
+  font-style: italic;
   color: var(--muted-strong);
   opacity: 0.86;
 }
@@ -824,8 +825,20 @@ input {
   margin-top: 0.24rem;
   font-size: 0.84rem;
   font-weight: 500;
+  font-style: italic;
   color: var(--muted-strong);
   opacity: 0.86;
+}
+
+.chat-exa-failure-detail {
+  margin: 0;
+  margin-top: 0.12rem;
+  font-size: 0.74rem;
+  line-height: 1.35;
+  color: rgba(255, 155, 155, 0.92);
+  opacity: 0.95;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .chat-assistant-think-wrap {
@@ -846,10 +859,12 @@ input {
   user-select: none;
   color: var(--muted-strong);
   font-size: 0.84rem;
+  font-weight: 500;
+  font-style: italic;
+  opacity: 0.86;
   display: inline-flex;
   align-items: center;
   gap: 0.36rem;
-  font: inherit;
 }
 
 .chat-assistant-think-caret {
@@ -892,6 +907,25 @@ input {
   overflow: hidden;
   font-style: italic;
   opacity: 0.9;
+}
+
+.chat-assistant-think-body .chat-content {
+  font-size: 0.84rem;
+  font-weight: 500;
+  font-style: italic;
+  color: var(--muted-strong);
+  opacity: 0.86;
+}
+
+.chat-assistant-think-body .chat-content h1,
+.chat-assistant-think-body .chat-content h2,
+.chat-assistant-think-body .chat-content h3,
+.chat-assistant-think-body .chat-content h4,
+.chat-assistant-think-body .chat-content h5,
+.chat-assistant-think-body .chat-content h6 {
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
 }
 
 .chat-assistant-think-body * {
@@ -1046,6 +1080,9 @@ input {
   flex-direction: column;
   gap: 5px;
   margin-top: 6px;
+  font-style: italic;
+  color: var(--muted-strong);
+  opacity: 0.9;
 }
 
 .exa-fetched-searching {
@@ -1056,27 +1093,40 @@ input {
 }
 
 .exa-fetched-label {
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  color: rgba(255, 255, 255, 0.35);
+  font-size: 0.84rem;
+  font-weight: 500;
+  font-style: italic;
+  letter-spacing: 0.01em;
+  color: var(--muted-strong);
+  opacity: 0.86;
 }
 
 .exa-fetched-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 10px;
   padding: 4px 0;
   text-decoration: none;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--muted-strong);
   opacity: 0;
   animation: exa-row-in 0.18s ease forwards;
   transition: color 0.12s;
 }
 
 .exa-fetched-row:hover {
-  color: rgba(255, 255, 255, 0.88);
+  color: var(--muted-strong);
+  text-decoration: none;
+}
+
+.exa-fetched-row:visited {
+  color: var(--muted-strong);
+}
+
+.chat-content .exa-fetched-row,
+.chat-content .exa-fetched-row:hover,
+.chat-content .exa-fetched-row:focus-visible {
+  text-decoration: none;
 }
 
 @keyframes exa-row-in {
@@ -1085,17 +1135,19 @@ input {
 }
 
 .exa-fetched-text {
-  font-size: 0.75rem;
-  font-weight: 400;
+  font-size: 0.84rem;
+  font-weight: 500;
+  font-style: italic;
+  text-decoration: none;
+  color: var(--muted-strong);
+  opacity: 0.86;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .exa-fetched-arrow {
-  font-size: 0.85rem;
-  opacity: 0.25;
-  flex-shrink: 0;
+  display: none;
 }
 
 .exa-pill-dots {

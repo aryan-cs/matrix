@@ -35,7 +35,7 @@ const CHAT_INITIAL_MESSAGE_STAGGER_MS = 500;
 const COMPOSER_DOCK_ANIMATION_MS = 680;
 const ARTIFACT_MODAL_EXIT_MS = 220;
 const THINKING_PLACEHOLDER_TEXT = "Performing matrix multiplications...";
-const EXA_SUCCESS_PLACEHOLDER_TEXT = "Searched the web with Exa.";
+const EXA_SUCCESS_PLACEHOLDER_TEXT = "";
 const EXA_FAILURE_PLACEHOLDER_TEXT = "Failed to search with Exa.";
 const STREAM_REVEAL_MIN_CHARS = 2;
 const STREAM_REVEAL_MAX_CHARS = 20;
@@ -1034,7 +1034,6 @@ function ExaStatusPill({ status }) {
         <a key={i} className="exa-fetched-row" href={r.url} target="_blank" rel="noreferrer"
            style={{ animationDelay: `${i * 70}ms` }}>
           <span className="exa-fetched-text">Fetched: {r.title || domainFromUrl(r.url)}</span>
-          <span className="exa-fetched-arrow">›</span>
         </a>
       ))}
     </div>
@@ -1054,20 +1053,25 @@ function renderMessageContent(message, options = {}) {
   }
 
   const exaStatusBlock =
-    message.pending && (message.exaWebSearchSuccess || message.exaWebSearchError) ? (
+    message.exaWebSearchSuccess || message.exaWebSearchError ? (
       <>
         {message.exaWebSearchSuccess ? (
           <p className="chat-exa-success-placeholder">{EXA_SUCCESS_PLACEHOLDER_TEXT}</p>
         ) : null}
         {message.exaWebSearchError ? (
-          <p className="chat-exa-failure-placeholder">{EXA_FAILURE_PLACEHOLDER_TEXT}</p>
+          <>
+            <p className="chat-exa-failure-placeholder">{EXA_FAILURE_PLACEHOLDER_TEXT}</p>
+            <p className="chat-exa-failure-detail">{String(message.exaWebSearchError)}</p>
+          </>
         ) : null}
       </>
     ) : null;
+  const exaFetchedStatusBlock = message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null;
 
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
     return (
       <>
+        {exaFetchedStatusBlock}
         {exaStatusBlock}
         <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
       </>
@@ -1097,6 +1101,7 @@ function renderMessageContent(message, options = {}) {
     if (showCsvArtifact) {
       return (
         <>
+          {exaFetchedStatusBlock}
           {exaStatusBlock}
           <CsvArtifactCard
             summary={csvSummary}
@@ -1126,6 +1131,7 @@ function renderMessageContent(message, options = {}) {
     }
     return (
       <>
+        {exaFetchedStatusBlock}
         {exaStatusBlock}
         {renderMarkdownContent(primaryAnswerText, message.id)}
       </>
@@ -1134,13 +1140,13 @@ function renderMessageContent(message, options = {}) {
 
   return (
     <>
+      {exaFetchedStatusBlock}
       {exaStatusBlock}
       <div className="chat-assistant-think-wrap">
         <ThinkDisclosure id={message.id} label={thinkLabel}>
           {renderMarkdownContent(thinkText, `${message.id}-think`)}
         </ThinkDisclosure>
       </div>
-      {message.exaStatus ? <ExaStatusPill status={message.exaStatus} /> : null}
       {hasAnswerText && showCsvArtifact ? (
         <div className="chat-assistant-answer">
           <CsvArtifactCard
@@ -2356,19 +2362,20 @@ function App() {
       const clarifyExaResult = await runExaSearch(promptText, "clarify");
       const clarifyExaData = clarifyExaResult.data;
       const clarifyExaSucceeded = Boolean(clarifyExaData?.results?.length);
-      if (clarifyExaSucceeded || clarifyExaResult.error) {
-        setChatMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === clarifyMsgId
-              ? {
-                  ...msg,
-                  exaWebSearchSuccess: clarifyExaSucceeded,
-                  exaWebSearchError: clarifyExaResult.error ? String(clarifyExaResult.error) : ""
-                }
-              : msg
-          )
-        );
-      }
+      setChatMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === clarifyMsgId
+            ? {
+                ...msg,
+                exaStatus: clarifyExaSucceeded
+                  ? { results: clarifyExaData.results.slice(0, 5) }
+                  : null,
+                exaWebSearchSuccess: clarifyExaSucceeded,
+                exaWebSearchError: clarifyExaResult.error ? String(clarifyExaResult.error) : ""
+              }
+            : msg
+        )
+      );
       const clarifyExaContext = formatExaContext(clarifyExaData);
 
       const clarifyPayload = {
