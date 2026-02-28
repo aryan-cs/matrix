@@ -91,6 +91,121 @@ input {
   flex-direction: column;
 }
 
+.agent-avatar-card {
+  width: min(920px, calc(100vw - 32px));
+  margin: 18px auto 8px;
+  padding: 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(11, 11, 11, 0.78);
+  backdrop-filter: blur(6px);
+  display: grid;
+  gap: 8px;
+}
+
+.agent-avatar-card h2 {
+  margin: 0;
+  font-size: 1.03rem;
+}
+
+.agent-avatar-caption {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.89rem;
+}
+
+.agent-avatar-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.agent-avatar-controls select {
+  flex: 1;
+  min-width: 280px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text);
+  padding: 8px 10px;
+}
+
+.agent-avatar-controls button {
+  border: none;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-weight: 600;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.95);
+  color: #111;
+}
+
+.agent-avatar-controls button.secondary {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--text);
+}
+
+.agent-avatar-controls button:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+.agent-avatar-status {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 0.88rem;
+}
+
+.agent-avatar-error {
+  margin: 0;
+  color: #ff9a9a;
+  font-size: 0.88rem;
+}
+
+.agent-avatar-meta p {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--muted-strong);
+}
+
+.agent-avatar-context {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.agent-avatar-context summary {
+  cursor: pointer;
+  color: var(--muted-strong);
+}
+
+.agent-avatar-context pre {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.agent-avatar-media {
+  min-height: 180px;
+  border-radius: 14px;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.24);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.agent-avatar-track {
+  width: 100%;
+  max-height: 360px;
+  border-radius: 10px;
+  background: #000;
+}
+
 .avatar-test-panel {
   width: min(920px, calc(100vw - 32px));
   margin: 18px auto 0;

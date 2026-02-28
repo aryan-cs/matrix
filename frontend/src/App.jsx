@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import DotWaveBackground from "./components/DotWaveBackground";
-import LiveKitTester from "./components/LiveKitTester";
+import AgentLiveAvatarCard from "./components/AgentLiveAvatarCard";
 import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
 
@@ -1114,6 +1114,7 @@ function App() {
       />
 
       <main className="main-panel">
+        <AgentLiveAvatarCard />
         <section className="hero">
           <div className="hero-copy">
             <h1>{displayTitle}</h1>
