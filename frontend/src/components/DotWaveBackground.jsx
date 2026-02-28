@@ -33,8 +33,8 @@ function DotWaveBackground() {
 
     const startX = -((GRID_X - 1) * POINT_SPACING) / 2;
     const startZ = -((GRID_Z - 1) * POINT_SPACING) / 2;
-    const colorNear = new THREE.Color("#9be7ff");
-    const colorFar = new THREE.Color("#1f3f53");
+    const colorNear = new THREE.Color("#ffffff");
+    const colorFar = new THREE.Color("#9a9a9a");
 
     let pointer = 0;
     for (let z = 0; z < GRID_Z; z += 1) {
@@ -65,11 +65,13 @@ function DotWaveBackground() {
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
     const material = new THREE.PointsMaterial({
-      size: 0.19,
+      size: 0.24,
       vertexColors: true,
       transparent: true,
-      opacity: 0.9,
-      sizeAttenuation: true
+      opacity: 1,
+      sizeAttenuation: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
     });
 
     const points = new THREE.Points(geometry, material);
