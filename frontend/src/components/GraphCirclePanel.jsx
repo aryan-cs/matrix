@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import callIcon from "../../assets/icons/call.svg";
 import notesIcon from "../../assets/icons/notes.svg";
 
@@ -26,7 +26,20 @@ const DETAIL_FIELDS = [
 
 function formatDetailValue(value) {
   const normalized = String(value ?? "").trim();
-  return normalized || "—";
+  if (!normalized) return "";
+  const lowered = normalized.toLowerCase();
+  if (
+    normalized === "-" ||
+    normalized === "—" ||
+    lowered === "n/a" ||
+    lowered === "na" ||
+    lowered === "none" ||
+    lowered === "null" ||
+    lowered === "undefined"
+  ) {
+    return "";
+  }
+  return normalized;
 }
 
 function buildNodeDetailRows(selectedNode, nodeById, adjacencyById) {
@@ -53,17 +66,21 @@ function buildNodeDetailRows(selectedNode, nodeById, adjacencyById) {
 
   const detailRows = [{ key: "agent_id", label: "Agent ID", value: selectedNode.id }];
   for (const [key, label] of DETAIL_FIELDS) {
+    const formattedValue = formatDetailValue(metadata[key]);
+    if (!formattedValue) continue;
     detailRows.push({
       key,
       label,
-      value: formatDetailValue(metadata[key])
+      value: formattedValue
     });
   }
-  detailRows.push({
-    key: "connected_nodes",
-    label: "Connected Nodes",
-    value: connectionNames.length > 0 ? connectionNames.join(", ") : "—"
-  });
+  if (connectionNames.length > 0) {
+    detailRows.push({
+      key: "connected_nodes",
+      label: "Connected Nodes",
+      value: connectionNames.join(", ")
+    });
+  }
 
   return detailRows;
 }
@@ -240,6 +257,8 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
     name: "",
     columns: [[], []]
   });
+  const [panelWidthPx, setPanelWidthPx] = useState(0);
+  const [selectedTooltipWidthPx, setSelectedTooltipWidthPx] = useState(0);
   const [isCanvasDraggingCursor, setIsCanvasDraggingCursor] = useState(false);
   const [journeyModalOpen, setJourneyModalOpen] = useState(false);
   const selectedNodeIdRef = useRef("");
@@ -250,6 +269,8 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
   const tooltipRef = useRef(null);
+  const selectedTooltipMeasureRef = useRef(null);
+  const activeTalkEdgesRef = useRef([]);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -292,6 +313,22 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
     const midpoint = Math.ceil(hoveredNodeDetails.length / 2);
     return [hoveredNodeDetails.slice(0, midpoint), hoveredNodeDetails.slice(midpoint)];
   }, [hoveredNodeDetails]);
+  const activeTalkEdges = useMemo(() => {
+    if (simulationStatus?.state !== "running") return [];
+    const rawEdges = Array.isArray(simulationStatus?.talk_edges) ? simulationStatus.talk_edges : [];
+    const normalized = [];
+    const seen = new Set();
+    for (const edge of rawEdges) {
+      const fromId = String(edge?.from ?? edge?.source ?? edge?.speaker ?? "").trim();
+      const toId = String(edge?.to ?? edge?.target ?? edge?.listener ?? "").trim();
+      if (!fromId || !toId || fromId === toId) continue;
+      const key = `${fromId}::${toId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      normalized.push({ from: fromId, to: toId });
+    }
+    return normalized;
+  }, [simulationStatus]);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -318,6 +355,10 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       columns: hoveredDetailColumns
     });
   }, [hoveredNode, hoveredNodeId, hoveredDetailColumns]);
+
+  useEffect(() => {
+    activeTalkEdgesRef.current = activeTalkEdges;
+  }, [activeTalkEdges]);
 
   useEffect(() => {
     if (selectedNodeId && !nodeById.has(selectedNodeId)) {
@@ -357,6 +398,40 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
 
   useEffect(() => {
     const stageNode = stageRef.current;
+    if (!stageNode) return undefined;
+
+    const syncPanelWidth = () => {
+      const nextWidth = Math.max(0, Math.floor(stageNode.clientWidth));
+      setPanelWidthPx((prev) => (prev === nextWidth ? prev : nextWidth));
+    };
+
+    syncPanelWidth();
+
+    const resizeObserver = new ResizeObserver(() => {
+      syncPanelWidth();
+    });
+    resizeObserver.observe(stageNode);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const stageNode = stageRef.current;
+    const measureNode = selectedTooltipMeasureRef.current;
+    if (!stageNode || !measureNode) return;
+
+    const availableWidth = Math.max(180, Math.floor(stageNode.clientWidth));
+    const measuredWidth = Math.ceil(measureNode.scrollWidth);
+    if (!Number.isFinite(measuredWidth) || measuredWidth <= 0) return;
+
+    const nextWidth = Math.max(180, Math.min(availableWidth, measuredWidth));
+    setSelectedTooltipWidthPx((prev) => (Math.abs(prev - nextWidth) < 1 ? prev : nextWidth));
+  }, [selectedTooltipSnapshot, panelWidthPx]);
+
+  useEffect(() => {
+    const stageNode = stageRef.current;
     const canvasNode = canvasRef.current;
     if (!stageNode || !canvasNode) return undefined;
 
@@ -375,11 +450,13 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       zoomScale: zoomScaleRef.current,
       nodes: [],
       edges: graphData.edges,
+      idToIndex: new Map(graphData.nodes.map((node, index) => [node.id, index])),
       rotationX: -0.34,
       rotationY: 0.42,
       velocityX: 0,
       velocityY: 0,
       edgeDashOffset: 0,
+      pulsePhase: 0,
       activePointerId: null,
       isDragging: false,
       dragDistanceSq: 0,
@@ -636,6 +713,60 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       context.setLineDash([]);
       context.lineDashOffset = 0;
 
+      const activeTalkEdges = activeTalkEdgesRef.current;
+      if (activeTalkEdges.length > 0) {
+        context.setLineDash([]);
+        context.lineDashOffset = 0;
+        context.lineCap = "round";
+
+        for (let i = 0; i < activeTalkEdges.length; i += 1) {
+          const talkEdge = activeTalkEdges[i];
+          const sourceIndex = engine.idToIndex.get(talkEdge.from);
+          const targetIndex = engine.idToIndex.get(talkEdge.to);
+          if (sourceIndex === undefined || targetIndex === undefined) continue;
+
+          const source = engine.nodes[sourceIndex];
+          const target = engine.nodes[targetIndex];
+          if (!source || !target) continue;
+
+          const dx = target.x - source.x;
+          const dy = target.y - source.y;
+          const distance = Math.hypot(dx, dy);
+          if (distance < 3) continue;
+
+          const avgDepth = (source.depth + target.depth) * 0.5;
+          const edgeWidth = 0.75 + avgDepth * 0.9;
+          const pulseLengthPx = Math.min(Math.max(16, distance * 0.18), 46);
+          const pulseLengthT = Math.min(0.7, pulseLengthPx / distance);
+          const headT = (engine.pulsePhase + i * 0.19) % 1;
+          const tailT = Math.max(0, headT - pulseLengthT);
+          const startX = source.x + dx * tailT;
+          const startY = source.y + dy * tailT;
+          const endX = source.x + dx * headT;
+          const endY = source.y + dy * headT;
+
+          const gradient = context.createLinearGradient(startX, startY, endX, endY);
+          const midAlpha = Math.min(0.86, 0.45 + avgDepth * 0.3);
+          gradient.addColorStop(0, "rgba(255, 255, 255, 0.05)");
+          gradient.addColorStop(0.72, `rgba(255, 255, 255, ${midAlpha.toFixed(3)})`);
+          gradient.addColorStop(1, "rgba(255, 255, 255, 0.98)");
+
+          context.beginPath();
+          context.moveTo(startX, startY);
+          context.lineTo(endX, endY);
+          context.strokeStyle = gradient;
+          context.lineWidth = edgeWidth;
+          context.stroke();
+
+          context.beginPath();
+          context.arc(endX, endY, Math.max(1.2, edgeWidth * 0.7), 0, Math.PI * 2);
+          context.fillStyle = "rgba(255, 255, 255, 0.98)";
+          context.fill();
+        }
+
+        context.lineCap = "butt";
+      }
+
       const sortedNodes = [...engine.nodes].sort((left, right) => left.z - right.z);
       const activeSelectedNodeId = selectedNodeIdRef.current;
       const hasSelectedNode = Boolean(activeSelectedNodeId);
@@ -644,9 +775,11 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
         const isDimmedBySelection = hasSelectedNode && !isSelected;
         const visualRadius = node.radius * (0.74 + node.depth * 0.56) + (isSelected ? 1.4 : 0);
         const depthShade = Math.round(86 + node.depth * 169);
-        const nodeShade = isDimmedBySelection
-          ? Math.max(36, Math.round(depthShade * 0.36))
-          : depthShade;
+        const nodeShade = isSelected
+          ? 255
+          : isDimmedBySelection
+            ? Math.max(36, Math.round(depthShade * 0.36))
+            : depthShade;
 
         context.beginPath();
         context.arc(node.x, node.y, visualRadius, 0, Math.PI * 2);
@@ -713,6 +846,7 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
         if (Math.abs(engine.velocityY) < 0.000004) engine.velocityY = 0;
       }
       engine.edgeDashOffset += 0.18;
+      engine.pulsePhase = (engine.pulsePhase + 0.012) % 1;
 
       draw();
       engine.rafId = window.requestAnimationFrame(animate);
@@ -773,6 +907,8 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
   const showGraphActionButtons = simDone && Boolean(selectedNodeId);
   const showHoverTooltip = Boolean(hoveredNodeId && hoveredNode);
   const showSelectedTooltip = Boolean(selectedNodeId && selectedNode);
+  const selectedTooltipNoData =
+    simDone && selectedNodeId && !(simulationData && simulationData[selectedNodeId]);
   const hoverTooltipName = showHoverTooltip
     ? hoveredNode?.label || hoveredNodeId
     : hoverTooltipSnapshot.name;
@@ -796,46 +932,8 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
           <div className="sim-status-bar-track">
             <div className="sim-status-bar-fill" style={{ width: `${simBarFill}%` }} />
           </div>
-          <span className="sim-status-label">
-            {simRunning
-              ? `Simulating… Day ${simDay + 1} / 5`
-              : simDone
-                ? "Simulation complete"
-                : `Simulation failed${simulationStatus?.error ? `: ${simulationStatus.error}` : ""}`}
-          </span>
         </div>
       )}
-
-      {showGraphActionButtons ? (
-        <div className="graph-panel-fab-stack" aria-label="Graph actions">
-          <button
-            type="button"
-            className="graph-panel-fab"
-            aria-label="Call"
-            title="Call"
-          >
-            <img src={callIcon} alt="" />
-          </button>
-          <button
-            type="button"
-            className="graph-panel-fab"
-            aria-label="View Simulation Journey"
-            disabled={!(simulationData && simulationData[selectedNodeId])}
-            onClick={
-              simulationData && simulationData[selectedNodeId]
-                ? () => setJourneyModalOpen(true)
-                : undefined
-            }
-            title={
-              simulationData && simulationData[selectedNodeId]
-                ? "View Simulation Journey"
-                : "No simulation data for this agent"
-            }
-          >
-            <img src={notesIcon} alt="" />
-          </button>
-        </div>
-      ) : null}
 
       <div
         ref={tooltipRef}
@@ -875,9 +973,39 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       <div
         className={`graph-node-tooltip graph-node-selected-tooltip ${
           showSelectedTooltip ? "open" : ""
-        }`}
+        } ${showGraphActionButtons ? "with-actions" : ""}`}
         aria-hidden={!showSelectedTooltip}
       >
+        {showGraphActionButtons ? (
+          <div className="graph-panel-fab-stack graph-panel-fab-stack-in-tooltip" aria-label="Graph actions">
+            <button
+              type="button"
+              className="graph-panel-fab graph-panel-fab-sm"
+              aria-label="Call"
+              title="Call"
+            >
+              <img src={callIcon} alt="" />
+            </button>
+            <button
+              type="button"
+              className="graph-panel-fab graph-panel-fab-sm"
+              aria-label="View Simulation Journey"
+              disabled={!(simulationData && simulationData[selectedNodeId])}
+              onClick={
+                simulationData && simulationData[selectedNodeId]
+                  ? () => setJourneyModalOpen(true)
+                  : undefined
+              }
+              title={
+                simulationData && simulationData[selectedNodeId]
+                  ? "View Simulation Journey"
+                  : "No simulation data for this agent"
+              }
+            >
+              <img src={notesIcon} alt="" />
+            </button>
+          </div>
+        ) : null}
         <div className="graph-node-terminal-profile">
           <p className="graph-node-terminal-name">{selectedTooltipSnapshot.name}</p>
           <div className="graph-node-terminal-grid">
@@ -899,9 +1027,37 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
               </div>
             ))}
           </div>
-          {simDone && selectedNodeId && !(simulationData && simulationData[selectedNodeId]) ? (
+          {selectedTooltipNoData ? (
             <p className="sim-no-data">No simulation data for this agent.</p>
           ) : null}
+        </div>
+      </div>
+
+      <div
+        ref={selectedTooltipMeasureRef}
+        className="graph-node-tooltip graph-node-selected-tooltip graph-node-selected-tooltip-measure open"
+        aria-hidden="true"
+      >
+        <div className="graph-node-terminal-profile">
+          <p className="graph-node-terminal-name">{selectedTooltipSnapshot.name}</p>
+          <div className="graph-node-terminal-grid">
+            {selectedTooltipSnapshot.columns.map((column, columnIndex) => (
+              <div
+                className="graph-node-terminal-column"
+                key={`selected-detail-measure-column-${columnIndex}`}
+              >
+                {column.map((detailRow, rowIndex) => (
+                  <div
+                    className="graph-node-terminal-row"
+                    key={`selected-detail-measure-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
+                  >
+                    <span className="graph-node-terminal-value">{detailRow.value}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          {selectedTooltipNoData ? <p className="sim-no-data">No simulation data for this agent.</p> : null}
         </div>
       </div>
 

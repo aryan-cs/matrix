@@ -33,6 +33,16 @@ def _load_repo_env_file() -> None:
 
 _load_repo_env_file()
 
+
+def _sanitize_ssl_env_paths() -> None:
+    for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        value = (os.environ.get(key) or "").strip()
+        if value and not Path(value).exists():
+            os.environ.pop(key, None)
+
+
+_sanitize_ssl_env_paths()
+
 import asyncio
 import csv
 import io
@@ -845,7 +855,14 @@ SIMULATION_MODAL_ENDPOINT = os.getenv(
     "https://matrix--deepseek-r1-1p5b-deepseekserver-openai-server.modal.run",
 ).strip().rstrip("/") + "/v1/chat/completions"
 
-_sim_status: dict = {"state": "idle", "progress": 0, "total": 0, "day": 0, "error": ""}
+_sim_status: dict = {
+    "state": "idle",
+    "progress": 0,
+    "total": 0,
+    "day": 0,
+    "error": "",
+    "talk_edges": [],
+}
 _sim_results: dict = {}
 
 
@@ -909,15 +926,15 @@ async def _call_sim_agent(
         "max_tokens": 512,
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
+    try:
+        async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
             resp = await client.post(SIMULATION_MODAL_ENDPOINT, json=payload)
             content = resp.json()["choices"][0]["message"]["content"]
             if "</think>" in content:
                 content = content.split("</think>", 1)[1].strip()
             return content.strip()
-        except Exception as exc:
-            return f"[{agent_id} unavailable: {exc}]"
+    except Exception as exc:
+        return f"[{agent_id} unavailable: {exc}]"
 
 
 async def _run_simulation_task(graph_data: Optional[dict] = None) -> None:
@@ -932,7 +949,7 @@ async def _run_simulation_task(graph_data: Optional[dict] = None) -> None:
         else:
             _sim_status = {
                 "state": "error", "progress": 0, "total": 0, "day": 0,
-                "error": "No graph data and graph.json not found",
+                "error": "No graph data and graph.json not found", "talk_edges": [],
             }
             return
 
@@ -945,12 +962,18 @@ async def _run_simulation_task(graph_data: Optional[dict] = None) -> None:
         total_steps = SIMULATION_DAYS * len(all_ids)
         done = 0
         _sim_status = {
-            "state": "running", "progress": 0, "total": total_steps, "day": 0, "error": "",
+            "state": "running",
+            "progress": 0,
+            "total": total_steps,
+            "day": 0,
+            "error": "",
+            "talk_edges": [],
         }
 
         for day in range(SIMULATION_DAYS):
             _sim_status["day"] = day
             day_talked_to: dict[str, list[str]] = {}
+            day_talk_edges: list[dict[str, str]] = []
             tasks, task_ids = [], []
 
             for agent_id in all_ids:
@@ -971,6 +994,10 @@ async def _run_simulation_task(graph_data: Optional[dict] = None) -> None:
                     neighbor_names_for_call = [
                         agent_map[nid]["metadata"].get("full_name", nid) for nid in active
                     ]
+                    for nid in active:
+                        if nid == agent_id:
+                            continue
+                        day_talk_edges.append({"from": nid, "to": agent_id})
                     day_talked_to[agent_id] = [
                         agent_map[nid]["metadata"].get("full_name", nid)
                         for nid in active if nid != agent_id
@@ -978,6 +1005,20 @@ async def _run_simulation_task(graph_data: Optional[dict] = None) -> None:
 
                 tasks.append(_call_sim_agent(agent_id, system_prompt, full_name, incoming, neighbor_names_for_call))
                 task_ids.append(agent_id)
+
+            unique_pairs = set()
+            unique_talk_edges = []
+            for pair in day_talk_edges:
+                from_id = str(pair.get("from", "")).strip()
+                to_id = str(pair.get("to", "")).strip()
+                if not from_id or not to_id or from_id == to_id:
+                    continue
+                key = (from_id, to_id)
+                if key in unique_pairs:
+                    continue
+                unique_pairs.add(key)
+                unique_talk_edges.append({"from": from_id, "to": to_id})
+            _sim_status["talk_edges"] = unique_talk_edges
 
             responses = await asyncio.gather(*tasks)
 
@@ -1011,12 +1052,12 @@ async def _run_simulation_task(graph_data: Optional[dict] = None) -> None:
 
         _sim_status = {
             "state": "done", "progress": total_steps, "total": total_steps,
-            "day": SIMULATION_DAYS, "error": "",
+            "day": SIMULATION_DAYS, "error": "", "talk_edges": [],
         }
 
     except Exception as exc:
         _sim_status = {
-            "state": "error", "progress": 0, "total": 0, "day": 0, "error": str(exc),
+            "state": "error", "progress": 0, "total": 0, "day": 0, "error": str(exc), "talk_edges": [],
         }
 
 
@@ -1030,7 +1071,7 @@ async def simulation_run(background_tasks: BackgroundTasks, body: Optional[Simul
     global _sim_status, _sim_results
     if _sim_status["state"] == "running":
         return {"status": "already_running"}
-    _sim_status = {"state": "running", "progress": 0, "total": 0, "day": 0, "error": ""}
+    _sim_status = {"state": "running", "progress": 0, "total": 0, "day": 0, "error": "", "talk_edges": []}
     _sim_results = {}
     graph_data = {"nodes": body.nodes, "edges": body.edges or []} if body and body.nodes else None
     background_tasks.add_task(_run_simulation_task, graph_data)

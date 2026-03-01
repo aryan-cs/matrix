@@ -36,7 +36,7 @@ const COMPOSER_DOCK_ANIMATION_MS = 680;
 const ARTIFACT_MODAL_EXIT_MS = 220;
 const THINKING_PLACEHOLDER_OPTIONS = [
   "Performing matrix multiplications...",
-  "Determining...",
+  "Determin(ant)ing...",
   "ad - bc = ...",
   "Grabbing attention...",
   "Convoluting..."

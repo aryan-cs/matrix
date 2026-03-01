@@ -199,6 +199,25 @@ input {
   pointer-events: none;
 }
 
+.graph-panel-fab-sm {
+  width: 34px;
+  height: 34px;
+}
+
+.graph-panel-fab-sm img {
+  width: 15px;
+  height: 15px;
+}
+
+.graph-panel-fab-stack-in-tooltip {
+  top: 8px;
+  right: 8px;
+  bottom: auto;
+  flex-direction: row;
+  gap: 8px;
+  z-index: 11;
+}
+
 .graph-node-tooltip {
   position: absolute;
   z-index: 8;
@@ -241,20 +260,57 @@ input {
 }
 
 .graph-node-selected-tooltip {
-  left: 50%;
-  right: auto;
+  left: 0;
+  right: 0;
+  margin-left: auto;
+  margin-right: auto;
   top: auto;
-  bottom: 14px;
-  width: min(340px, calc(100% - 24px));
-  max-height: min(42%, 280px);
+  bottom: 0;
+  width: 80%;
+  max-width: none;
+  max-height: min(42%, 320px);
   opacity: 1;
-  transform: translate3d(-50%, calc(100% + 52px), 0) scale(0.975);
+  transform: translate3d(0, calc(100% + 52px), 0) scale(0.975);
   transition: transform 640ms var(--ease-slingshot);
   will-change: transform;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
 }
 
 .graph-node-selected-tooltip.open {
-  transform: translate3d(-50%, 0, 0) scale(1);
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.graph-node-selected-tooltip.with-actions {
+  padding-right: 92px;
+}
+
+.graph-node-selected-tooltip-measure {
+  left: -99999px !important;
+  top: -99999px !important;
+  bottom: auto !important;
+  width: max-content !important;
+  max-width: none !important;
+  max-height: none !important;
+  visibility: hidden;
+  opacity: 0 !important;
+  overflow: visible !important;
+  pointer-events: none !important;
+  transform: none !important;
+  transition: none !important;
+}
+
+.graph-node-selected-tooltip-measure .graph-node-terminal-name,
+.graph-node-selected-tooltip-measure .graph-node-terminal-value {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.graph-node-selected-tooltip-measure .graph-node-terminal-grid {
+  grid-template-columns: max-content max-content;
 }
 
 .graph-node-terminal-profile {
@@ -326,53 +382,40 @@ input {
 /* ── Simulation status bar (top of canvas) ── */
 .sim-status-bar {
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
+  top: 10px;
+  left: 12px;
+  right: 12px;
   z-index: 6;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 14px;
-  background: rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(4px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 0;
   pointer-events: none;
 }
 
 .sim-status-bar-track {
-  flex: 1;
-  height: 3px;
+  width: 100%;
+  height: 6px;
+  box-sizing: border-box;
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.02),
+    0 6px 14px rgba(0, 0, 0, 0.26);
   overflow: hidden;
 }
 
 .sim-status-bar-fill {
   height: 100%;
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.9);
   transition: width 0.6s ease;
 }
 
 .sim-status-bar.done .sim-status-bar-fill {
-  background: rgba(120, 255, 160, 0.72);
+  background: rgba(255, 255, 255, 0.9);
 }
 
 .sim-status-bar.error .sim-status-bar-fill {
-  background: rgba(255, 130, 130, 0.72);
-}
-
-.sim-status-label {
-  font-size: 0.7rem;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.55);
-  white-space: nowrap;
-  letter-spacing: 0.03em;
-}
-
-.sim-status-bar.error .sim-status-label {
-  color: rgba(255, 160, 160, 0.86);
+  background: rgba(255, 255, 255, 0.9);
 }
 
 /* ── View Journey button (inside terminal) ── */
