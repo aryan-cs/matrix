@@ -847,6 +847,54 @@ function downloadCsvArtifact(csvPayload, runId = "") {
   return true;
 }
 
+function sanitizeFilenameToken(value, fallback) {
+  const safe = String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return safe || fallback;
+}
+
+function formatReportDownloadFilename(runId = "", extension = "md") {
+  const safeExtension = extension === "tex" ? "tex" : "md";
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const base = sanitizeFilenameToken(runId, "simulation-report");
+  return `${base}-${stamp}.${safeExtension}`;
+}
+
+function downloadTextArtifact(payload, filename, mimeType) {
+  const normalized = String(payload || "").trim();
+  if (!normalized) return false;
+
+  const blob = new Blob([normalized.endsWith("\n") ? normalized : `${normalized}\n`], {
+    type: mimeType
+  });
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 1000);
+
+  return true;
+}
+
+function downloadReportArtifact(content, { runId = "", extension = "md", filename = "" } = {}) {
+  const normalizedExtension = extension === "tex" ? "tex" : "md";
+  const preferredName = String(filename || "").trim();
+  const finalName = preferredName || formatReportDownloadFilename(runId, normalizedExtension);
+  const mimeType =
+    normalizedExtension === "tex" ? "application/x-tex;charset=utf-8" : "text/markdown;charset=utf-8";
+  return downloadTextArtifact(content, finalName, mimeType);
+}
+
 function CsvArtifactCard({
   summary,
   pending = false,
@@ -902,6 +950,89 @@ function CsvArtifactCard({
       >
         <img src={downloadIcon} alt="" />
       </button>
+    </div>
+  );
+}
+
+function formatReportCreatedLabel(createdAt) {
+  const iso = String(createdAt || "").trim();
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleString();
+}
+
+function ReportArtifactCard({
+  runId = "",
+  createdAt = "",
+  hasMarkdown = false,
+  hasLatex = false,
+  onOpen = null,
+  onDownloadMarkdown = null,
+  onDownloadLatex = null
+}) {
+  const isInteractive = typeof onOpen === "function" && (hasMarkdown || hasLatex);
+  const createdLabel = formatReportCreatedLabel(createdAt);
+  const metaParts = [];
+  if (runId) {
+    metaParts.push(`Run: ${runId}`);
+  }
+  if (createdLabel) {
+    metaParts.push(createdLabel);
+  }
+  const metaText = metaParts.join(" | ");
+
+  return (
+    <div className="report-artifact-card">
+      <button
+        type="button"
+        className={`report-artifact-main ${isInteractive ? "interactive" : ""}`}
+        aria-label="Open simulation report artifact"
+        onClick={() => {
+          if (isInteractive) {
+            onOpen();
+          }
+        }}
+        disabled={!isInteractive}
+      >
+        <div className="report-artifact-badge">REPORT</div>
+        <div className="report-artifact-copy">
+          <p className="report-artifact-title">Final Research Report</p>
+          {metaText ? <p className="report-artifact-meta">{metaText}</p> : null}
+        </div>
+      </button>
+      <div className="report-artifact-actions">
+        <button
+          type="button"
+          className="report-artifact-action-btn"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (typeof onDownloadMarkdown === "function") {
+              onDownloadMarkdown();
+            }
+          }}
+          disabled={!hasMarkdown || typeof onDownloadMarkdown !== "function"}
+          aria-label="Download markdown report"
+          title="Download markdown report"
+        >
+          MD
+        </button>
+        <button
+          type="button"
+          className="report-artifact-action-btn"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (typeof onDownloadLatex === "function") {
+              onDownloadLatex();
+            }
+          }}
+          disabled={!hasLatex || typeof onDownloadLatex !== "function"}
+          aria-label="Download LaTeX report"
+          title="Download LaTeX report"
+        >
+          TEX
+        </button>
+      </div>
     </div>
   );
 }
@@ -1079,6 +1210,61 @@ function renderMessageContent(message, options = {}) {
       </div>
     ) : null;
 
+  if (message.uiType === "sim-report") {
+    const reportMarkdown = String(message.reportMarkdown || message.content || "").trim();
+    const reportLatex = String(message.reportLatex || "").trim();
+    const reportRunId = String(message.reportRunId || "").trim();
+    const reportCreatedAt = String(message.reportCreatedAt || "").trim();
+    const reportFiles =
+      message.reportFiles && typeof message.reportFiles === "object" ? message.reportFiles : {};
+
+    return (
+      <>
+        {exaMetaBlock}
+        <ReportArtifactCard
+          runId={reportRunId}
+          createdAt={reportCreatedAt}
+          hasMarkdown={Boolean(reportMarkdown)}
+          hasLatex={Boolean(reportLatex)}
+          onOpen={
+            onOpenArtifact
+              ? () =>
+                  onOpenArtifact({
+                    kind: "report",
+                    messageId: message.id,
+                    markdown: reportMarkdown,
+                    latex: reportLatex,
+                    runId: reportRunId,
+                    createdAt: reportCreatedAt,
+                    files: reportFiles
+                  })
+              : null
+          }
+          onDownloadMarkdown={
+            reportMarkdown
+              ? () =>
+                  downloadReportArtifact(reportMarkdown, {
+                    runId: reportRunId,
+                    extension: "md",
+                    filename: reportFiles.markdown || ""
+                  })
+              : null
+          }
+          onDownloadLatex={
+            reportLatex
+              ? () =>
+                  downloadReportArtifact(reportLatex, {
+                    runId: reportRunId,
+                    extension: "tex",
+                    filename: reportFiles.latex || ""
+                  })
+              : null
+          }
+        />
+      </>
+    );
+  }
+
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
     return (
       <>
@@ -1134,7 +1320,12 @@ function renderMessageContent(message, options = {}) {
             previewText={artifactPreviewText}
             onOpen={
               onOpenArtifact
-                ? () => onOpenArtifact({ messageId: message.id, content: artifactPreviewText })
+                ? () =>
+                    onOpenArtifact({
+                      kind: "csv",
+                      messageId: message.id,
+                      content: artifactPreviewText
+                    })
                 : null
             }
             onDownload={
@@ -1178,7 +1369,12 @@ function renderMessageContent(message, options = {}) {
             previewText={artifactPreviewText}
             onOpen={
               onOpenArtifact
-                ? () => onOpenArtifact({ messageId: message.id, content: artifactPreviewText })
+                ? () =>
+                    onOpenArtifact({
+                      kind: "csv",
+                      messageId: message.id,
+                      content: artifactPreviewText
+                    })
                 : null
             }
             onDownload={
@@ -1220,9 +1416,16 @@ function messageShouldRenderCsvArtifact(message) {
   return Boolean(summarizeCsvArtifact(primaryAnswerText)) || isLikelyCsvDraft(primaryAnswerText);
 }
 
+function messageShouldRenderArtifact(message) {
+  if (!message || message.role !== "assistant") return false;
+  if (message.uiType === "sim-report") return true;
+  return messageShouldRenderCsvArtifact(message);
+}
+
 function messageHasThinkSection(message) {
   if (!message || message.role !== "assistant") return false;
   if (message.uiType === "status-tooltip") return false;
+  if (message.uiType === "sim-report") return false;
 
   const messageText = String(message.content || "");
   if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
@@ -1459,6 +1662,8 @@ function App() {
   const [previewError, setPreviewError] = useState("");
   const [artifactModal, setArtifactModal] = useState(null);
   const [isArtifactModalClosing, setIsArtifactModalClosing] = useState(false);
+  const [isArtifactModalMinimized, setIsArtifactModalMinimized] = useState(false);
+  const [isArtifactModalMaximized, setIsArtifactModalMaximized] = useState(false);
   const [queuedArtifactDownloadIds, setQueuedArtifactDownloadIds] = useState(() => new Set());
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isChatMode, setIsChatMode] = useState(false);
@@ -1469,6 +1674,8 @@ function App() {
   const [isGraphPanelResizing, setIsGraphPanelResizing] = useState(false);
   const [simulationData, setSimulationData] = useState(null);
   const [simulationStatus, setSimulationStatus] = useState(null);
+  const [simulationReport, setSimulationReport] = useState(null);
+  const [lastScenarioPrompt, setLastScenarioPrompt] = useState("");
   const simulationPollRef = useRef(null);
   const [chatMessages, setChatMessages] = useState([]);
   const [placeholderText, setPlaceholderText] = useState(
@@ -1712,19 +1919,41 @@ function App() {
     };
   }, []);
 
-  const handleRunSimulation = async () => {
+  const handleRunSimulation = async (stimulusText = "") => {
     if (simulationStatus?.state === "running") return;
     setSimulationData(null);
+    setSimulationReport(null);
     setSimulationStatus({ state: "running", progress: 0, total: 0, day: 0 });
+    const normalizedStimulus = String(stimulusText || lastScenarioPrompt || "").trim();
+    const simulationPayload =
+      graphPanelGraph && typeof graphPanelGraph === "object"
+        ? { ...graphPanelGraph, stimulus: normalizedStimulus }
+        : { stimulus: normalizedStimulus };
 
     try {
-      await fetch("/api/simulation/run", {
+      const runResponse = await fetch("/api/simulation/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(graphPanelGraph || {}),
+        body: JSON.stringify(simulationPayload),
       });
-    } catch {
-      setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: "Network error" });
+      if (!runResponse.ok) {
+        let detail = "";
+        try {
+          const errorBody = await runResponse.json();
+          detail = String(errorBody?.detail || "").trim();
+        } catch {
+          detail = "";
+        }
+        throw new Error(detail || `Simulation start failed (${runResponse.status})`);
+      }
+    } catch (error) {
+      setSimulationStatus({
+        state: "error",
+        progress: 0,
+        total: 0,
+        day: 0,
+        error: error?.message || "Network error"
+      });
       return;
     }
 
@@ -1741,6 +1970,49 @@ function App() {
           const resultsRes = await fetch("/api/simulation/results");
           if (resultsRes.ok) {
             setSimulationData(await resultsRes.json());
+          }
+          try {
+            const reportRes = await fetch("/api/simulation/report");
+            if (reportRes.ok) {
+              const reportData = await reportRes.json();
+              setSimulationReport(reportData);
+              if (reportData?.markdown || reportData?.latex) {
+                setChatMessages((prev) => [
+                  ...prev,
+                  {
+                    id: createRuntimeId("assistant"),
+                    role: "assistant",
+                    uiType: "sim-report",
+                    content: String(reportData?.markdown || ""),
+                    reportMarkdown: String(reportData?.markdown || ""),
+                    reportLatex: String(reportData?.latex || ""),
+                    reportRunId: String(reportData?.runId || ""),
+                    reportCreatedAt: String(reportData?.createdAt || ""),
+                    reportFiles:
+                      reportData?.files && typeof reportData.files === "object" ? reportData.files : {}
+                  }
+                ]);
+              }
+            } else {
+              const errorText = await reportRes.text();
+              setChatMessages((prev) => [
+                ...prev,
+                {
+                  id: createRuntimeId("assistant"),
+                  role: "assistant",
+                  content: `Report generation failed: ${errorText || `HTTP ${reportRes.status}`}`
+                }
+              ]);
+            }
+          } catch (reportError) {
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                id: createRuntimeId("assistant"),
+                role: "assistant",
+                content: `Report retrieval failed: ${reportError?.message || "Unknown error"}`
+              }
+            ]);
           }
         } else if (status.state === "error") {
           clearInterval(simulationPollRef.current);
@@ -1872,6 +2144,13 @@ function App() {
 
   const closeArtifactModalWithAnimation = () => {
     if (!artifactModal || isArtifactModalClosing) return;
+    if (isArtifactModalMinimized) {
+      setArtifactModal(null);
+      setIsArtifactModalClosing(false);
+      setIsArtifactModalMinimized(false);
+      setIsArtifactModalMaximized(false);
+      return;
+    }
     setIsArtifactModalClosing(true);
     if (artifactModalCloseTimerRef.current) {
       window.clearTimeout(artifactModalCloseTimerRef.current);
@@ -1879,6 +2158,8 @@ function App() {
     artifactModalCloseTimerRef.current = window.setTimeout(() => {
       setArtifactModal(null);
       setIsArtifactModalClosing(false);
+      setIsArtifactModalMinimized(false);
+      setIsArtifactModalMaximized(false);
       artifactModalCloseTimerRef.current = 0;
     }, ARTIFACT_MODAL_EXIT_MS);
   };
@@ -1896,19 +2177,56 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleEscape);
     };
-  }, [artifactModal, isArtifactModalClosing]);
+  }, [artifactModal, isArtifactModalClosing, isArtifactModalMinimized]);
 
-  const handleOpenArtifactModal = ({ messageId, content }) => {
+  const handleOpenArtifactModal = ({
+    kind = "csv",
+    messageId,
+    content,
+    markdown,
+    latex,
+    runId = "",
+    createdAt = "",
+    files = null
+  }) => {
     if (artifactModalCloseTimerRef.current) {
       window.clearTimeout(artifactModalCloseTimerRef.current);
       artifactModalCloseTimerRef.current = 0;
     }
     setIsArtifactModalClosing(false);
-    const normalized = String(content || "").trim();
+    setIsArtifactModalMinimized(false);
+    setIsArtifactModalMaximized(false);
+    const normalizedCsv = String(content || "").trim();
+    const normalizedMarkdown = String(markdown || "").trim();
+    const normalizedLatex = String(latex || "").trim();
+    const normalizedReportView = normalizedMarkdown || normalizedLatex;
     setArtifactModal({
+      kind: kind === "report" ? "report" : "csv",
       messageId: messageId || "",
-      content: normalized
+      content: kind === "report" ? normalizedReportView : normalizedCsv,
+      markdown: normalizedMarkdown,
+      latex: normalizedLatex,
+      runId: String(runId || "").trim(),
+      createdAt: String(createdAt || "").trim(),
+      files: files && typeof files === "object" ? files : null
     });
+  };
+
+  const handleArtifactModalMinimize = () => {
+    if (!artifactModal || artifactModal.kind !== "report") return;
+    setIsArtifactModalMinimized(true);
+    setIsArtifactModalMaximized(false);
+  };
+
+  const handleArtifactModalRestore = () => {
+    if (!artifactModal) return;
+    setIsArtifactModalClosing(false);
+    setIsArtifactModalMinimized(false);
+  };
+
+  const handleArtifactModalToggleMaximize = () => {
+    if (!artifactModal || artifactModal.kind !== "report" || isArtifactModalMinimized) return;
+    setIsArtifactModalMaximized((previous) => !previous);
   };
 
   const isArtifactDownloadQueued = (messageId) => queuedArtifactDownloadIds.has(messageId);
@@ -1966,6 +2284,7 @@ function App() {
 
   useEffect(() => {
     if (!artifactModal?.messageId) return;
+    if (artifactModal.kind !== "csv") return;
 
     const currentMessage = chatMessages.find((message) => message.id === artifactModal.messageId);
     if (!currentMessage || currentMessage.role !== "assistant") return;
@@ -2312,6 +2631,7 @@ function App() {
   };
 
   const runMainQuery = async (enrichedPrompt, filesForSubmit, assistantPendingTurnId) => {
+    setLastScenarioPrompt(String(enrichedPrompt || "").trim());
     const plannerContext = await buildPlannerContextBlock(filesForSubmit);
     const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
     const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
@@ -2675,7 +2995,7 @@ function App() {
             <div className="chat-scroll">
               <div className="chat-spacer" aria-hidden="true" />
               {chatMessages.map((message) => {
-                const isArtifactMessage = messageShouldRenderCsvArtifact(message);
+                const isArtifactMessage = messageShouldRenderArtifact(message);
                 const isStatusTooltipMessage =
                   message.role === "assistant" && message.uiType === "status-tooltip";
                 const hasThinkSection = messageHasThinkSection(message);
@@ -2852,34 +3172,88 @@ function App() {
       ) : null}
 
       {artifactModal ? (
-        <div
-          className={`artifact-backdrop ${isArtifactModalClosing ? "closing" : ""}`}
-          role="dialog"
-          aria-modal="true"
-          aria-label="CSV output preview"
-          onClick={closeArtifactModalWithAnimation}
-        >
-          <div className="artifact-modal" onClick={(event) => event.stopPropagation()}>
-            <header className="artifact-header">
-              <div className="artifact-header-text">
-                <p className="artifact-title">Generated CSV Content</p>
-                <p className="artifact-meta">Live output preview</p>
-              </div>
-              <button
-                type="button"
-                className="artifact-close-btn"
-                onClick={closeArtifactModalWithAnimation}
-                aria-label="Close CSV preview"
-              >
-                <img src={closeIcon} alt="" />
-              </button>
-            </header>
+        isArtifactModalMinimized && artifactModal.kind === "report" ? (
+          <button
+            type="button"
+            className="artifact-minimized-chip"
+            onClick={handleArtifactModalRestore}
+            aria-label="Restore report preview"
+          >
+            <span className="artifact-minimized-title">Research Report</span>
+            <span className="artifact-minimized-meta">Restore</span>
+          </button>
+        ) : (
+          <div
+            className={`artifact-backdrop ${isArtifactModalClosing ? "closing" : ""}`}
+            role="dialog"
+            aria-modal="true"
+            aria-label={artifactModal.kind === "report" ? "Research report preview" : "CSV output preview"}
+            onClick={closeArtifactModalWithAnimation}
+          >
+            <div
+              className={`artifact-modal ${isArtifactModalMaximized ? "maximized" : ""}`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <header className="artifact-header">
+                <div className="artifact-header-text">
+                  <p className="artifact-title">
+                    {artifactModal.kind === "report" ? "Simulation Research Report" : "Generated CSV Content"}
+                  </p>
+                  <p className="artifact-meta">
+                    {artifactModal.kind === "report" ? "Markdown preview" : "Live output preview"}
+                  </p>
+                </div>
+                <div className="artifact-header-actions">
+                  {artifactModal.kind === "report" ? (
+                    <>
+                      <button
+                        type="button"
+                        className="artifact-control-btn"
+                        onClick={handleArtifactModalMinimize}
+                        aria-label="Minimize report preview"
+                      >
+                        Minimize
+                      </button>
+                      <button
+                        type="button"
+                        className="artifact-control-btn"
+                        onClick={handleArtifactModalToggleMaximize}
+                        aria-label={isArtifactModalMaximized ? "Exit maximized report preview" : "Maximize report preview"}
+                      >
+                        {isArtifactModalMaximized ? "Exit Fullscreen" : "Maximize"}
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="artifact-close-btn"
+                    onClick={closeArtifactModalWithAnimation}
+                    aria-label={
+                      artifactModal.kind === "report" ? "Close report preview" : "Close CSV preview"
+                    }
+                  >
+                    <img src={closeIcon} alt="" />
+                  </button>
+                </div>
+              </header>
 
-            <div className="artifact-content">
-              <CsvPreviewTable csvText={artifactModal.content} />
+              <div className={`artifact-content ${artifactModal.kind === "report" ? "report" : ""}`}>
+                {artifactModal.kind === "report" ? (
+                  <div className="artifact-report-wrap">
+                    <div className="chat-content artifact-report-body">
+                      {renderMarkdownContent(
+                        artifactModal.markdown || artifactModal.content || "Report content is unavailable.",
+                        `${artifactModal.messageId || "artifact"}-report-modal`
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <CsvPreviewTable csvText={artifactModal.content} />
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        )
       ) : null}
     </div>
   );

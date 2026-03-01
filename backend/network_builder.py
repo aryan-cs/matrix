@@ -9,6 +9,7 @@ import re
 import urllib.parse
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,8 @@ DEFAULT_PLANNER_ENDPOINT = (
     "https://aryan-cs--deepseek-r1-32b-openai-server.modal.run/v1/chat/completions"
 )
 DEFAULT_PLANNER_MODEL_ID = "deepseek-r1"
+DEFAULT_REPORT_ENDPOINT = DEFAULT_PLANNER_ENDPOINT
+DEFAULT_REPORT_MODEL_ID = DEFAULT_PLANNER_MODEL_ID
 PLANNER_CONTEXT_MAX_TOTAL_CHARS = 26000
 PLANNER_CONTEXT_MAX_FILE_CHARS = 5000
 DEFAULT_LIVEAVATAR_BASE_URL = "https://api.liveavatar.com/v1"
@@ -144,6 +147,19 @@ def _load_planner_system_prompt() -> str:
         return default_prompt
 
 
+def _load_report_system_prompt() -> str:
+    default_prompt = (
+        "You are an academic simulation report writer. Produce a detailed, evidence-based, "
+        "research-paper-style Markdown report of approximately 4-5 pages."
+    )
+    prompt_path = Path(__file__).resolve().parent.parent / "report-system-prompt.txt"
+    try:
+        raw = prompt_path.read_text(encoding="utf-8").strip()
+        return raw or default_prompt
+    except OSError:
+        return default_prompt
+
+
 def _planner_endpoint() -> str:
     return os.getenv("PLANNER_MODEL_ENDPOINT", DEFAULT_PLANNER_ENDPOINT).strip()
 
@@ -159,6 +175,31 @@ def _planner_api_key() -> str:
 def _planner_headers() -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     api_key = _planner_api_key()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _report_endpoint() -> str:
+    raw = os.getenv("REPORT_MODEL_ENDPOINT", DEFAULT_REPORT_ENDPOINT).strip().rstrip("/")
+    if raw.endswith("/v1/chat/completions"):
+        return raw
+    if raw:
+        return f"{raw}/v1/chat/completions"
+    return raw
+
+
+def _report_model_id() -> str:
+    return os.getenv("REPORT_MODEL_ID", DEFAULT_REPORT_MODEL_ID).strip()
+
+
+def _report_api_key() -> str:
+    return os.getenv("REPORT_API_KEY", _planner_api_key()).strip()
+
+
+def _report_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    api_key = _report_api_key()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
@@ -804,10 +845,11 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
 SUPERMEMORY_API_KEY = os.getenv("SUPERMEMORY_API_KEY", "").strip()
 SUPERMEMORY_BASE_URL = "https://api.supermemory.ai"
 SIMULATION_GRAPH_PATH = Path(__file__).resolve().parent / "graph.json"
+SIMULATION_REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 SIMULATION_DAYS = 5
-SIMULATION_NEWS_SPARK = (
-    "BREAKING: A leaked Texas legislative proposal suggests a 20% tax credit "
-    "for small businesses, offset by a 5% tax hike on luxury properties over $2M."
+SIMULATION_DEFAULT_STIMULUS = (
+    "Scenario context was not provided by the client. Use the generated agent profiles "
+    "and network structure as discussion context."
 )
 SIMULATION_MODAL_ENDPOINT = os.getenv(
     "SIM_MODAL_ENDPOINT",
@@ -816,6 +858,254 @@ SIMULATION_MODAL_ENDPOINT = os.getenv(
 
 _sim_status: dict = {"state": "idle", "progress": 0, "total": 0, "day": 0, "error": ""}
 _sim_results: dict = {}
+_sim_run_id: str = ""
+_sim_report: dict = {}
+_sim_nodes: list = []
+
+REPORT_SYSTEM_PROMPT = _load_report_system_prompt()
+
+
+def _resolve_simulation_stimulus(stimulus: str | None) -> str:
+    normalized = str(stimulus or "").strip()
+    return normalized or SIMULATION_DEFAULT_STIMULUS
+
+
+def _clean_excerpt(text: str, max_len: int) -> str:
+    normalized = str(text or "").replace("\n", " ").strip()
+    if len(normalized) <= max_len:
+        return normalized
+    return f"{normalized[:max_len - 1]}..."
+
+
+def _latex_escape(text: str) -> str:
+    escaped = str(text or "")
+    escaped = escaped.replace("\\", r"\textbackslash{}")
+    escaped = escaped.replace("&", r"\&")
+    escaped = escaped.replace("%", r"\%")
+    escaped = escaped.replace("$", r"\$")
+    escaped = escaped.replace("#", r"\#")
+    escaped = escaped.replace("_", r"\_")
+    escaped = escaped.replace("{", r"\{")
+    escaped = escaped.replace("}", r"\}")
+    escaped = escaped.replace("~", r"\textasciitilde{}")
+    escaped = escaped.replace("^", r"\textasciicircum{}")
+    return escaped
+
+
+def _convert_inline_formatting(text: str) -> str:
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"\\textbf{\\textit{\1}}", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\\textbf{\1}", text)
+    text = re.sub(r"\*(.+?)\*", r"\\textit{\1}", text)
+    text = re.sub(r"`(.+?)`", r"\\texttt{\1}", text)
+    return text
+
+
+def _markdown_to_latex(markdown_text: str, title: str) -> str:
+    lines = markdown_text.replace("\r\n", "\n").split("\n")
+    tex: list[str] = [
+        r"\documentclass[11pt,twocolumn]{article}",
+        r"\usepackage[margin=0.75in]{geometry}",
+        r"\usepackage[T1]{fontenc}",
+        r"\usepackage{booktabs,longtable}",
+        r"\usepackage{hyperref}",
+        r"\usepackage{enumitem}",
+        r"\setlength{\parskip}{0.35em}",
+        r"\setlength{\parindent}{0em}",
+        rf"\title{{{_latex_escape(title)}}}",
+        rf"\date{{{datetime.now(timezone.utc).strftime('%Y-%m-%d')}}}",
+        r"\author{Matrix Multi-Agent Simulation Platform}",
+        r"\begin{document}",
+        r"\maketitle",
+        "",
+    ]
+
+    in_list = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if in_list:
+                tex.append(r"\end{itemize}")
+                in_list = False
+            tex.append("")
+            continue
+
+        if stripped.startswith("### "):
+            if in_list:
+                tex.append(r"\end{itemize}")
+                in_list = False
+            tex.append(rf"\subsection{{{_latex_escape(stripped[4:])}}}")
+            continue
+        if stripped.startswith("## "):
+            if in_list:
+                tex.append(r"\end{itemize}")
+                in_list = False
+            tex.append(rf"\section{{{_latex_escape(stripped[3:])}}}")
+            continue
+        if stripped.startswith("# "):
+            continue
+        if re.match(r"^\s*[-*+]\s+", stripped):
+            if not in_list:
+                tex.append(r"\begin{itemize}[nosep]")
+                in_list = True
+            bullet_text = re.sub(r"^\s*[-*+]\s+", "", stripped)
+            tex.append(rf"\item {_convert_inline_formatting(_latex_escape(bullet_text))}")
+            continue
+
+        if in_list:
+            tex.append(r"\end{itemize}")
+            in_list = False
+        tex.append(_convert_inline_formatting(_latex_escape(stripped)))
+
+    if in_list:
+        tex.append(r"\end{itemize}")
+    tex.append(r"\end{document}")
+    return "\n".join(tex)
+
+
+def _build_report_data_context(
+    nodes: list[dict[str, Any]],
+    results: dict[str, Any],
+    news_spark: str,
+    days: int,
+) -> str:
+    n_agents = len(nodes)
+    edge_set: set[tuple[str, str]] = set()
+    for node in nodes:
+        source = str(node.get("id", "")).strip()
+        for target in node.get("connections", []):
+            target_id = str(target).strip()
+            if source and target_id and source != target_id:
+                edge_set.add(tuple(sorted((source, target_id))))
+
+    sections: list[str] = [
+        "SIMULATION OVERVIEW:",
+        f"- Agents: {n_agents}",
+        f"- Edges: {len(edge_set)}",
+        f"- Simulation days: {days}",
+        f"- News stimulus: \"{news_spark}\"",
+        "",
+        "AGENT DEMOGRAPHICS:",
+        "agent_id | full_name | age | gender | ethnicity | occupation | political_lean | income | connections_count",
+    ]
+
+    for node in nodes:
+        metadata = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+        sections.append(
+            f"{node.get('id', '?')} | {metadata.get('full_name', '?')} | {metadata.get('age', '?')} | "
+            f"{metadata.get('gender', '?')} | {metadata.get('ethnicity', '?')} | "
+            f"{metadata.get('occupation', '?')} | {metadata.get('political_lean', '?')} | "
+            f"{metadata.get('household_income_usd', '?')} | {len(node.get('connections', []))}"
+        )
+
+    sections.extend(["", "AGENT DAY-BY-DAY OUTPUTS:"])
+    for agent_id, data in results.items():
+        full_name = data.get("full_name", agent_id)
+        sections.append(f"\n--- {full_name} ({agent_id}) ---")
+        for day_row in data.get("days", []):
+            day_num = int(day_row.get("day", 0)) + 1
+            talked_to = ", ".join(day_row.get("talked_to", [])) or "none"
+            content = _clean_excerpt(day_row.get("content", ""), 420)
+            sections.append(f"Day {day_num} | Talked to: {talked_to}")
+            sections.append(f"Response: \"{content}\"")
+
+    return "\n".join(sections)
+
+
+def _report_has_scenario_drift(report_markdown: str, news_spark: str) -> tuple[bool, str]:
+    report_lower = str(report_markdown or "").lower()
+    stimulus_lower = str(news_spark or "").lower()
+    if "texas" in report_lower and "texas" not in stimulus_lower:
+        return True, "report mentions Texas but scenario stimulus does not"
+    return False, ""
+
+
+async def _call_report_llm(
+    data_context: str,
+    run_id: str,
+    news_spark: str,
+    *,
+    strict_grounding: bool = False,
+    drift_reason: str = "",
+) -> str:
+    endpoint = _report_endpoint()
+    if not endpoint:
+        raise ValueError("Report endpoint is not configured.")
+
+    model_id = _report_model_id() or "deepseek-r1"
+    strict_block = (
+        "STRICT GROUNDING OVERRIDE:\n"
+        "- Scenario fidelity is mandatory.\n"
+        "- Do not introduce Texas unless explicitly in the scenario text.\n"
+        if strict_grounding
+        else ""
+    )
+    repair_note = (
+        f"\nPrior attempt drift reason: {drift_reason}\nRewrite from scratch with strict scenario fidelity.\n"
+        if strict_grounding and drift_reason
+        else ""
+    )
+    user_content = (
+        f"Run ID: {run_id}\n"
+        f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        "SCENARIO GROUND TRUTH (must match exactly):\n"
+        f"\"{news_spark}\"\n\n"
+        "Generate a detailed 4-5 page conference paper using only this run data.\n"
+        "Use concrete statistics and qualitative evidence throughout.\n\n"
+        f"{repair_note}\n"
+        f"{data_context}"
+    )
+
+    payload = {
+        "model": model_id,
+        "temperature": 0.2,
+        "max_tokens": 4200,
+        "messages": [
+            {"role": "system", "content": f"{REPORT_SYSTEM_PROMPT}\n\n{strict_block}".strip()},
+            {"role": "user", "content": user_content},
+        ],
+    }
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        resp = await client.post(endpoint, json=payload, headers=_report_headers())
+        if not resp.is_success:
+            raise ValueError(f"Report endpoint returned HTTP {resp.status_code}: {resp.text[:400]}")
+        body = resp.json()
+        content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if "</think>" in content:
+            content = content.split("</think>", 1)[1].strip()
+        return str(content or "").strip()
+
+
+async def _generate_simulation_reports(
+    nodes: list[dict[str, Any]],
+    results: dict[str, Any],
+    run_id: str,
+    news_spark: str,
+    days: int,
+) -> tuple[str, str]:
+    data_context = _build_report_data_context(nodes, results, news_spark, days)
+    report_md = await _call_report_llm(data_context, run_id, news_spark)
+    if not report_md:
+        raise RuntimeError("Report model returned empty content.")
+
+    has_drift, drift_reason = _report_has_scenario_drift(report_md, news_spark)
+    if has_drift:
+        retry = await _call_report_llm(
+            data_context,
+            run_id,
+            news_spark,
+            strict_grounding=True,
+            drift_reason=drift_reason,
+        )
+        if retry:
+            report_md = retry
+
+    has_drift, drift_reason = _report_has_scenario_drift(report_md, news_spark)
+    if has_drift:
+        raise RuntimeError(f"Scenario drift in report output: {drift_reason}")
+
+    report_title = f"Simulation Report — {run_id}"
+    report_tex = _markdown_to_latex(report_md, report_title)
+    return report_md, report_tex
 
 
 async def _store_supermemory(agent_id: str, day: int, content: str) -> None:
@@ -889,25 +1179,30 @@ async def _call_sim_agent(
             return f"[{agent_id} unavailable: {exc}]"
 
 
-async def _run_simulation_task(graph_data: dict | None = None) -> None:
+async def _run_simulation_task(graph_data: dict | None = None, stimulus: str | None = None) -> None:
     """Background task: run the full 5-day simulation."""
-    global _sim_status, _sim_results
+    global _sim_status, _sim_results, _sim_run_id, _sim_report, _sim_nodes
+
+    _sim_run_id = datetime.now(timezone.utc).isoformat()
+    _sim_report = {}
+    _sim_nodes = []
+    resolved_stimulus = _resolve_simulation_stimulus(stimulus)
 
     try:
         if graph_data and graph_data.get("nodes"):
             graph = graph_data
-        elif SIMULATION_GRAPH_PATH.exists():
-            graph = json.loads(SIMULATION_GRAPH_PATH.read_text(encoding="utf-8"))
         else:
             _sim_status = {
                 "state": "error", "progress": 0, "total": 0, "day": 0,
-                "error": "No graph data provided and graph.json not found",
+                "error": "No graph data provided for simulation run.",
             }
             return
 
         nodes = graph.get("nodes", [])
+        _sim_nodes = nodes
         agent_map = {n["id"]: n for n in nodes}
         all_ids = [n["id"] for n in nodes]
+        news_spark = resolved_stimulus
 
         results: dict[str, list[dict]] = {aid: [] for aid in all_ids}
         current_messages: dict[str, str] = {}
@@ -932,14 +1227,16 @@ async def _run_simulation_task(graph_data: dict | None = None) -> None:
                 neighbors = agent.get("connections", [])
 
                 if day == 0:
-                    incoming = [SIMULATION_NEWS_SPARK]
+                    incoming = [news_spark]
                     neighbor_names_for_call: list[str] = []
                     day_talked_to[agent_id] = []
                 else:
-                    active_neighbors = [nid for nid in neighbors if nid in current_messages]
-                    if not active_neighbors:
-                        active_neighbors = [agent_id] if agent_id in current_messages else []
-                    incoming = [current_messages[nid] for nid in active_neighbors] if active_neighbors else [SIMULATION_NEWS_SPARK]
+                    active_neighbors = [nid for nid in neighbors if nid in current_messages and nid != agent_id]
+                    if active_neighbors:
+                        incoming = [current_messages[nid] for nid in active_neighbors]
+                    else:
+                        prior_message = current_messages.get(agent_id, "")
+                        incoming = [prior_message] if prior_message else [news_spark]
                     neighbor_names_for_call = [
                         agent_map[nid]["metadata"].get("full_name", nid)
                         for nid in active_neighbors
@@ -984,6 +1281,41 @@ async def _run_simulation_task(graph_data: dict | None = None) -> None:
                 "final": days_data[-1]["content"] if days_data else "",
             }
 
+        # Generate research report artifacts after simulation completion.
+        try:
+            report_md, report_tex = await _generate_simulation_reports(
+                nodes=nodes,
+                results=_sim_results,
+                run_id=_sim_run_id,
+                news_spark=news_spark,
+                days=SIMULATION_DAYS,
+            )
+            safe_run_id = _sim_run_id.replace(":", "-").replace("+", "")
+            SIMULATION_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+            md_filename = f"simulation-report-{safe_run_id}.md"
+            tex_filename = f"simulation-report-{safe_run_id}.tex"
+            md_path = SIMULATION_REPORTS_DIR / md_filename
+            tex_path = SIMULATION_REPORTS_DIR / tex_filename
+            md_path.write_text(report_md, encoding="utf-8")
+            tex_path.write_text(report_tex, encoding="utf-8")
+            _sim_report = {
+                "runId": _sim_run_id,
+                "markdown": report_md,
+                "latex": report_tex,
+                "markdownFile": str(md_path),
+                "latexFile": str(tex_path),
+                "files": {"markdown": md_filename, "latex": tex_filename},
+                "stimulus": news_spark,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as report_exc:
+            _sim_report = {
+                "runId": _sim_run_id,
+                "error": f"Report generation failed: {report_exc}",
+                "stimulus": news_spark,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+            }
+
         _sim_status = {
             "state": "done", "progress": total_steps, "total": total_steps,
             "day": SIMULATION_DAYS, "error": "",
@@ -998,19 +1330,26 @@ async def _run_simulation_task(graph_data: dict | None = None) -> None:
 class SimulationRunRequest(BaseModel):
     nodes: list[dict] | None = None
     edges: list[dict] | None = None
+    stimulus: str | None = None
 
 
 @app.post("/api/simulation/run")
 async def simulation_run(background_tasks: BackgroundTasks, body: SimulationRunRequest | None = None):
-    global _sim_status, _sim_results
+    global _sim_status, _sim_results, _sim_report
     if _sim_status["state"] == "running":
         return {"status": "already_running"}
+    if body is not None and not body.nodes:
+        raise HTTPException(
+            status_code=400,
+            detail="Simulation graph nodes are required. Generate agent data before running simulation.",
+        )
     _sim_status = {"state": "running", "progress": 0, "total": 0, "day": 0, "error": ""}
     _sim_results = {}
+    _sim_report = {}
     graph_data = None
     if body and body.nodes:
         graph_data = {"nodes": body.nodes, "edges": body.edges or []}
-    background_tasks.add_task(_run_simulation_task, graph_data)
+    background_tasks.add_task(_run_simulation_task, graph_data, body.stimulus if body else None)
     return {"status": "started"}
 
 
@@ -1024,6 +1363,41 @@ async def simulation_results():
     if _sim_status["state"] != "done":
         raise HTTPException(status_code=425, detail="Simulation not complete yet.")
     return _sim_results
+
+
+@app.get("/api/simulation/report")
+async def simulation_report():
+    if _sim_status["state"] != "done":
+        raise HTTPException(status_code=425, detail="Simulation not complete yet.")
+    if not _sim_report:
+        raise HTTPException(status_code=404, detail="Report not available.")
+    if _sim_report.get("error"):
+        raise HTTPException(status_code=502, detail=str(_sim_report.get("error")))
+    return _sim_report
+
+
+@app.get("/api/simulation/report/file")
+async def simulation_report_file(format: str = "md"):
+    if _sim_status["state"] != "done":
+        raise HTTPException(status_code=425, detail="Simulation not complete yet.")
+    if not _sim_report or _sim_report.get("error"):
+        raise HTTPException(status_code=404, detail="Report artifact unavailable.")
+
+    normalized = format.lower().strip()
+    if normalized not in {"md", "tex"}:
+        raise HTTPException(status_code=400, detail="format must be one of: md, tex")
+
+    content_key = "markdown" if normalized == "md" else "latex"
+    payload = str(_sim_report.get(content_key, ""))
+    filename = _sim_report.get("files", {}).get("markdown" if normalized == "md" else "latex", f"simulation-report.{normalized}")
+
+    return {
+        "format": normalized,
+        "filename": filename,
+        "content": payload,
+        "runId": _sim_report.get("runId", ""),
+        "createdAt": _sim_report.get("createdAt", ""),
+    }
 
 
 @app.get("/api/simulation/graph")
