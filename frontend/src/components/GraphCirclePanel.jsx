@@ -170,8 +170,65 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function GraphCirclePanel({ graph = null }) {
+function SimulationJourney({ data }) {
+  if (!data || !data.days || data.days.length === 0) return null;
+  const [expandedDay, setExpandedDay] = useState(-1);
+
+  return (
+    <div className="sim-journey">
+      <div className="sim-journey-header">Simulation Journey</div>
+
+      <div className="sim-section">
+        <div className="sim-section-label">Initial Reaction — Day 0</div>
+        <div className="sim-section-text">{data.initial}</div>
+      </div>
+
+      {data.days.length > 2 && (
+        <div className="sim-section">
+          <div className="sim-section-label">Evolution</div>
+          <div className="sim-day-list">
+            {data.days.slice(1, -1).map((d) => (
+              <button
+                key={d.day}
+                type="button"
+                className={`sim-day-chip ${expandedDay === d.day ? "active" : ""}`}
+                onClick={() => setExpandedDay(expandedDay === d.day ? -1 : d.day)}
+              >
+                Day {d.day + 1}
+              </button>
+            ))}
+          </div>
+          {expandedDay >= 0 && (() => {
+            const dayData = data.days.find((d) => d.day === expandedDay);
+            if (!dayData) return null;
+            return (
+              <div className="sim-day-expanded">
+                {dayData.talked_to?.length > 0 && (
+                  <div className="sim-talked-to">Talked to: {dayData.talked_to.join(", ")}</div>
+                )}
+                <div>{dayData.content}</div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      <div className="sim-section final">
+        <div className="sim-section-label">Final Position — Day {data.days.length}</div>
+        {data.days[data.days.length - 1]?.talked_to?.length > 0 && (
+          <div className="sim-talked-to">
+            Talked to: {data.days[data.days.length - 1].talked_to.join(", ")}
+          </div>
+        )}
+        <div className="sim-section-text">{data.final}</div>
+      </div>
+    </div>
+  );
+}
+
+function GraphCirclePanel({ graph = null, simulationData = null, simulationStatus = null }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [journeyModalOpen, setJourneyModalOpen] = useState(false);
   const selectedNodeIdRef = useRef("");
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
@@ -208,6 +265,7 @@ function GraphCirclePanel({ graph = null }) {
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
+    setJourneyModalOpen(false);
   }, [selectedNodeId]);
 
   useEffect(() => {
@@ -562,6 +620,11 @@ function GraphCirclePanel({ graph = null }) {
   const resolvedCount = graphData.nodes.length;
   const isTerminalOpen = Boolean(selectedNodeId);
 
+  const simRunning = simulationStatus?.state === "running";
+  const simDone = simulationStatus?.state === "done";
+  const simDay = simulationStatus?.day || 0;
+  const simBarFill = simRunning ? Math.round((simDay / 5) * 100) : simDone ? 100 : 0;
+
   return (
     <div className={`graph-circle-canvas ${isTerminalOpen ? "terminal-open" : ""}`}>
       <div className="graph-circle-stage" ref={stageRef}>
@@ -570,14 +633,52 @@ function GraphCirclePanel({ graph = null }) {
         ) : null}
         <canvas ref={canvasRef} className="graph-circle-canvas-element" />
       </div>
+
+      {(simRunning || simDone) && (
+        <div className={`sim-status-bar ${simDone ? "done" : ""}`}>
+          <div className="sim-status-bar-track">
+            <div className="sim-status-bar-fill" style={{ width: `${simBarFill}%` }} />
+          </div>
+          <span className="sim-status-label">
+            {simRunning
+              ? `Simulating… Day ${simDay + 1} / 5`
+              : "Simulation complete"}
+          </span>
+        </div>
+      )}
+
       <div className="graph-panel-fab-stack" aria-label="Graph actions">
-        <button type="button" className="graph-panel-fab" aria-label="Call">
+        <button
+          type="button"
+          className={`graph-panel-fab ${!simDone ? "sim-locked" : ""}`}
+          aria-label="Call"
+          disabled={!simDone}
+          title={!simDone ? "Available after simulation completes" : "Call"}
+        >
           <img src={callIcon} alt="" />
         </button>
-        <button type="button" className="graph-panel-fab" aria-label="Notes">
+        <button
+          type="button"
+          className={`graph-panel-fab ${!simDone ? "sim-locked" : ""}`}
+          aria-label="View Simulation Journey"
+          disabled={!simDone || !(simulationData && simulationData[selectedNodeId])}
+          onClick={
+            simDone && simulationData && simulationData[selectedNodeId]
+              ? () => setJourneyModalOpen(true)
+              : undefined
+          }
+          title={
+            !simDone
+              ? "Available after simulation completes"
+              : simulationData && simulationData[selectedNodeId]
+              ? "View Simulation Journey"
+              : "No simulation data for this agent"
+          }
+        >
           <img src={notesIcon} alt="" />
         </button>
       </div>
+
       <div
         className={`graph-node-terminal ${isTerminalOpen ? "open" : ""}`}
         aria-hidden={!isTerminalOpen}
@@ -602,9 +703,41 @@ function GraphCirclePanel({ graph = null }) {
                 </div>
               ))}
             </div>
+            {simDone && !(simulationData && simulationData[selectedNodeId]) ? (
+              <p className="sim-no-data">No simulation data for this agent.</p>
+            ) : null}
           </div>
         </div>
       </div>
+
+      {journeyModalOpen && simulationData && simulationData[selectedNodeId] && (
+        <div
+          className="sim-journey-modal-overlay"
+          onClick={() => setJourneyModalOpen(false)}
+        >
+          <div
+            className="sim-journey-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sim-journey-modal-header">
+              <span className="sim-journey-modal-title">
+                {selectedNode?.label || selectedNodeId}
+              </span>
+              <button
+                type="button"
+                className="sim-journey-modal-close"
+                onClick={() => setJourneyModalOpen(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="sim-journey-modal-scroll">
+              <SimulationJourney data={simulationData[selectedNodeId]} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

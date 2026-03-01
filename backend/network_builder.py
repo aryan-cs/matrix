@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+import asyncio
 import csv
 import io
 import json
@@ -8,10 +13,10 @@ import re
 import urllib.parse
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import httpx
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -793,3 +798,224 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
         session_id=session_id,
         system_prompt=agent.get("system_prompt", ""),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Simulation — 5-day agent communication with Supermemory persistence
+# ──────────────────────────────────────────────────────────────────────────────
+
+SUPERMEMORY_API_KEY = os.getenv("SUPERMEMORY_API_KEY", "").strip()
+SUPERMEMORY_BASE_URL = "https://api.supermemory.ai"
+SIMULATION_GRAPH_PATH = Path(__file__).resolve().parent / "graph.json"
+SIMULATION_DAYS = 5
+SIMULATION_NEWS_SPARK = (
+    "BREAKING: A leaked Texas legislative proposal suggests a 20% tax credit "
+    "for small businesses, offset by a 5% tax hike on luxury properties over $2M."
+)
+SIMULATION_MODAL_ENDPOINT = os.getenv(
+    "SIM_MODAL_ENDPOINT",
+    "https://matrix--deepseek-r1-1p5b-deepseekserver-openai-server.modal.run",
+).strip().rstrip("/") + "/v1/chat/completions"
+
+_sim_status: dict = {"state": "idle", "progress": 0, "total": 0, "day": 0, "error": ""}
+_sim_results: dict = {}
+
+
+async def _store_supermemory(agent_id: str, day: int, content: str) -> None:
+    """Persist an agent's daily thought to Supermemory."""
+    if not SUPERMEMORY_API_KEY:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await client.post(
+                f"{SUPERMEMORY_BASE_URL}/v1/memories",
+                headers={
+                    "Authorization": f"Bearer {SUPERMEMORY_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "content": f"[Agent {agent_id} | Day {day}]\n{content}",
+                    "metadata": {"agent_id": agent_id, "day": str(day)},
+                },
+            )
+    except Exception:
+        pass
+
+
+async def _call_sim_agent(
+    agent_id: str,
+    system_prompt: str,
+    full_name: str,
+    incoming_messages: list[str],
+    neighbor_names: list[str],
+) -> str:
+    """Call DeepSeek R1 on Modal for one agent turn."""
+    first_name = full_name.split()[0] if full_name else agent_id
+
+    if not neighbor_names:
+        user_content = f'You just heard this news: "{incoming_messages[0]}"'
+    elif len(incoming_messages) == 1:
+        user_content = f'Your neighbor {neighbor_names[0]} just shared: "{incoming_messages[0]}"'
+    else:
+        msgs = "\n".join(
+            f'- {neighbor_names[i] if i < len(neighbor_names) else "Someone"} said: "{m[:200]}"'
+            for i, m in enumerate(incoming_messages[:5])
+        )
+        user_content = f"Your neighbors have been talking:\n{msgs}\nWhat's your take?"
+
+    payload = {
+        "model": "deepseek-r1",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"You ARE {full_name}. {system_prompt}\n\n"
+                    f"IMPORTANT: You are {full_name}. Speak in first person ('I', 'me', 'my'). "
+                    f"Never use any other name for yourself. Never narrate. "
+                    f"Respond in 2-3 sentences only."
+                ),
+            },
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.9,
+        "max_tokens": 512,
+    }
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        try:
+            resp = await client.post(SIMULATION_MODAL_ENDPOINT, json=payload)
+            content = resp.json()["choices"][0]["message"]["content"]
+            if "</think>" in content:
+                content = content.split("</think>", 1)[1].strip()
+            return content.strip()
+        except Exception as exc:
+            return f"[{agent_id} unavailable: {exc}]"
+
+
+async def _run_simulation_task(graph_data: dict | None = None) -> None:
+    """Background task: run the full 5-day simulation."""
+    global _sim_status, _sim_results
+
+    try:
+        if graph_data and graph_data.get("nodes"):
+            graph = graph_data
+        elif SIMULATION_GRAPH_PATH.exists():
+            graph = json.loads(SIMULATION_GRAPH_PATH.read_text(encoding="utf-8"))
+        else:
+            _sim_status = {
+                "state": "error", "progress": 0, "total": 0, "day": 0,
+                "error": "No graph data and graph.json not found",
+            }
+            return
+
+        nodes = graph.get("nodes", [])
+        agent_map = {n["id"]: n for n in nodes}
+        all_ids = [n["id"] for n in nodes]
+
+        results: dict[str, list[dict]] = {aid: [] for aid in all_ids}
+        current_messages: dict[str, str] = {}
+        total_steps = SIMULATION_DAYS * len(all_ids)
+        done = 0
+        _sim_status = {
+            "state": "running", "progress": 0, "total": total_steps, "day": 0, "error": "",
+        }
+
+        for day in range(SIMULATION_DAYS):
+            _sim_status["day"] = day
+            day_talked_to: dict[str, list[str]] = {}
+            tasks, task_ids = [], []
+
+            for agent_id in all_ids:
+                agent = agent_map[agent_id]
+                system_prompt = agent["metadata"].get("system_prompt", "")
+                full_name = agent["metadata"].get("full_name", agent_id)
+                neighbors = agent.get("connections", [])
+
+                if day == 0:
+                    incoming = [SIMULATION_NEWS_SPARK]
+                    neighbor_names_for_call: list[str] = []
+                    day_talked_to[agent_id] = []
+                else:
+                    active = [nid for nid in neighbors if nid in current_messages]
+                    if not active:
+                        active = [agent_id] if agent_id in current_messages else []
+                    incoming = [current_messages[nid] for nid in active] if active else [SIMULATION_NEWS_SPARK]
+                    neighbor_names_for_call = [
+                        agent_map[nid]["metadata"].get("full_name", nid) for nid in active
+                    ]
+                    day_talked_to[agent_id] = [
+                        agent_map[nid]["metadata"].get("full_name", nid)
+                        for nid in active if nid != agent_id
+                    ]
+
+                tasks.append(_call_sim_agent(agent_id, system_prompt, full_name, incoming, neighbor_names_for_call))
+                task_ids.append(agent_id)
+
+            responses = await asyncio.gather(*tasks)
+
+            next_messages: dict[str, str] = {}
+            memory_tasks = []
+            for agent_id, response in zip(task_ids, responses):
+                next_messages[agent_id] = response
+                results[agent_id].append({
+                    "day": day,
+                    "content": response,
+                    "talked_to": day_talked_to.get(agent_id, []),
+                })
+                memory_tasks.append(_store_supermemory(agent_id, day, response))
+                done += 1
+
+            _sim_status["progress"] = done
+            await asyncio.gather(*memory_tasks)
+            current_messages = next_messages
+
+        _sim_results = {}
+        for agent_id in all_ids:
+            meta = agent_map[agent_id]["metadata"]
+            days_data = results[agent_id]
+            _sim_results[agent_id] = {
+                "agent_id": agent_id,
+                "full_name": meta.get("full_name", agent_id),
+                "days": days_data,
+                "initial": days_data[0]["content"] if days_data else "",
+                "final": days_data[-1]["content"] if days_data else "",
+            }
+
+        _sim_status = {
+            "state": "done", "progress": total_steps, "total": total_steps,
+            "day": SIMULATION_DAYS, "error": "",
+        }
+
+    except Exception as exc:
+        _sim_status = {
+            "state": "error", "progress": 0, "total": 0, "day": 0, "error": str(exc),
+        }
+
+
+class SimulationRunRequest(BaseModel):
+    nodes: list[dict] | None = None
+    edges: list[dict] | None = None
+
+
+@app.post("/api/simulation/run")
+async def simulation_run(background_tasks: BackgroundTasks, body: SimulationRunRequest | None = None):
+    global _sim_status, _sim_results
+    if _sim_status["state"] == "running":
+        return {"status": "already_running"}
+    _sim_status = {"state": "running", "progress": 0, "total": 0, "day": 0, "error": ""}
+    _sim_results = {}
+    graph_data = {"nodes": body.nodes, "edges": body.edges or []} if body and body.nodes else None
+    background_tasks.add_task(_run_simulation_task, graph_data)
+    return {"status": "started"}
+
+
+@app.get("/api/simulation/status")
+async def simulation_status():
+    return _sim_status
+
+
+@app.get("/api/simulation/results")
+async def simulation_results():
+    if _sim_status["state"] != "done":
+        raise HTTPException(status_code=425, detail="Simulation not complete yet.")
+    return _sim_results
