@@ -64,6 +64,7 @@ const CHAT_AUTO_SCROLL_THRESHOLD_PX = 40;
 const DEFAULT_PLANNER_MODEL_ENDPOINT = "";
 const DEFAULT_PLANNER_MODEL_ID = "deepseek-r1";
 const DEFAULT_PLANNER_DEV_PROXY_PATH = "/api/planner/chat";
+const DEFAULT_SAVE_GENERATED_CSV_ENDPOINT = "/api/agents/generated-csv";
 const DEFAULT_EXA_PROXY_PATH = "/api/exa/search";
 const DEFAULT_CONTEXT_MAX_TOTAL_CHARS = 26000;
 const DEFAULT_CONTEXT_MAX_FILE_CHARS = 5000;
@@ -86,6 +87,9 @@ const PLANNER_DEV_PROXY_PATH = (
 ).trim();
 const USE_PLANNER_DEV_PROXY =
   import.meta.env.DEV && import.meta.env.VITE_USE_PLANNER_PROXY !== "false";
+const SAVE_GENERATED_CSV_ENDPOINT = (
+  import.meta.env.VITE_SAVE_GENERATED_CSV_ENDPOINT || DEFAULT_SAVE_GENERATED_CSV_ENDPOINT
+).trim();
 const EXA_PROXY_PATH = (import.meta.env.VITE_EXA_PROXY_PATH || DEFAULT_EXA_PROXY_PATH).trim();
 const PLANNER_CONTEXT_MAX_TOTAL_CHARS = parsePositiveInt(
   import.meta.env.VITE_PLANNER_CONTEXT_MAX_TOTAL_CHARS,
@@ -845,6 +849,34 @@ function downloadCsvArtifact(csvPayload, runId = "") {
   }, 1000);
 
   return true;
+}
+
+async function persistGeneratedCsvArtifact(csvPayload) {
+  const normalized = String(csvPayload || "").trim();
+  if (!normalized || !SAVE_GENERATED_CSV_ENDPOINT) {
+    return null;
+  }
+
+  const response = await fetch(SAVE_GENERATED_CSV_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ csv_text: normalized })
+  });
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const parsed = await response.json();
+      detail = typeof parsed?.detail === "string" ? parsed.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(
+      `Failed to persist generated CSV (${response.status})${detail ? `: ${detail}` : ""}`
+    );
+  }
+
+  return response.json();
 }
 
 function CsvArtifactCard({
@@ -2310,6 +2342,13 @@ function App() {
 
     const csvPayload = extractCsvPayload(plannerText);
     if (!csvPayload) return;
+    try {
+      await persistGeneratedCsvArtifact(csvPayload);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to persist generated CSV to backend.";
+      console.warn(message);
+    }
     const sampleCount = parseCsvRecords(csvPayload).rows.length;
     const derivedGraph = buildNetworkGraphFromCsv(csvPayload);
     setGraphPanelGraph(derivedGraph && Array.isArray(derivedGraph.nodes) ? derivedGraph : null);

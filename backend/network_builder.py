@@ -6,6 +6,8 @@ import io
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.error
@@ -85,6 +87,16 @@ class GraphBuildResponse(BaseModel):
 class PlannerContextResponse(BaseModel):
     output_text: str
     model: str
+
+
+class SaveGeneratedCsvRequest(BaseModel):
+    csv_text: str = Field(..., min_length=1)
+
+
+class SaveGeneratedCsvResponse(BaseModel):
+    saved_path: str
+    row_count: int
+    avatar_mapping_path: str
 
 
 class AvatarAgentSummary(BaseModel):
@@ -361,6 +373,17 @@ def _planner_stream_events(prompt: str, context_block: str):
 
 def _agents_csv_path() -> Path:
     configured = os.getenv("AVATAR_AGENTS_CSV", str(DEFAULT_AGENTS_CSV_PATH)).strip()
+    return Path(configured)
+
+
+def _save_generated_agents_csv_path() -> Path:
+    configured = os.getenv("GENERATED_AGENTS_CSV_PATH", str(DEFAULT_AGENTS_CSV_PATH)).strip()
+    return Path(configured)
+
+
+def _pick_avatars_script_path() -> Path:
+    default_script = Path(__file__).resolve().parent.parent / "avatars" / "pick_avatars_modal.py"
+    configured = os.getenv("PICK_AVATARS_SCRIPT", str(default_script)).strip()
     return Path(configured)
 
 
@@ -674,6 +697,52 @@ def _parse_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
     return fieldnames, rows
 
 
+def _write_generated_agents_csv(csv_text: str) -> tuple[Path, int]:
+    normalized = str(csv_text or "").replace("\r\n", "\n").strip()
+    if not normalized:
+        raise ValueError("CSV content is empty.")
+
+    fieldnames, rows = _parse_csv_rows(normalized)
+    output_path = _save_generated_agents_csv_path()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({name: row.get(name, "") for name in fieldnames})
+
+    return output_path, len(rows)
+
+
+def _refresh_agent_avatar_mapping(agents_csv_path: Path) -> Path:
+    script_path = _pick_avatars_script_path()
+    if not script_path.exists():
+        raise ValueError(f"Avatar picker script not found: {script_path}")
+
+    output_mapping_path = _agent_mapping_path()
+    env = os.environ.copy()
+    env["AGENTS_CSV"] = str(agents_csv_path)
+    env["OUT_MAP_JSON"] = str(output_mapping_path)
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        preview = details[:500] if details else "No script output captured."
+        raise ValueError(f"Avatar mapping refresh failed: {preview}")
+
+    if not output_mapping_path.exists():
+        raise ValueError(f"Avatar mapping file was not produced: {output_mapping_path}")
+    return output_mapping_path
+
+
 def build_social_graph(csv_text: str, directed: bool = False) -> GraphBuildResponse:
     _fieldnames, rows = _parse_csv_rows(csv_text)
 
@@ -888,6 +957,23 @@ async def planner_context_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@app.post("/api/agents/generated-csv", response_model=SaveGeneratedCsvResponse)
+async def save_generated_agents_csv(payload: SaveGeneratedCsvRequest) -> SaveGeneratedCsvResponse:
+    try:
+        output_path, row_count = _write_generated_agents_csv(payload.csv_text)
+        mapping_path = _refresh_agent_avatar_mapping(output_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write CSV file: {exc}") from exc
+
+    return SaveGeneratedCsvResponse(
+        saved_path=str(output_path),
+        row_count=row_count,
+        avatar_mapping_path=str(mapping_path),
     )
 
 
