@@ -791,6 +791,50 @@ function summarizeCsvArtifact(csvText) {
   };
 }
 
+function buildCsvSummaryMessage(csvText) {
+  const { headers, rows } = parseCsvRecords(csvText);
+  if (!rows.length) return null;
+
+  const n = rows.length;
+  const lines = [`Here's a summary of the ${n} generated agent${n !== 1 ? "s" : ""}:`];
+
+  // Connection stats
+  if (headers.includes("connections")) {
+    const counts = rows.map((row) => {
+      const conns = (row["connections"] || "").trim();
+      return conns ? conns.split(/[|;,]/).filter(Boolean).length : 0;
+    });
+    const avg = (counts.reduce((a, b) => a + b, 0) / n).toFixed(1);
+    const min = Math.min(...counts);
+    const max = Math.max(...counts);
+    lines.push(`• Connections: avg ${avg} per agent (range ${min}–${max})`);
+  }
+
+  // Demographic fields
+  const fields = [
+    ["gender", "Gender"],
+    ["ethnicity", "Ethnicity"],
+    ["political_lean", "Political lean"],
+    ["socioeconomic_status", "Socioeconomic status"],
+    ["education", "Education"],
+    ["occupation", "Occupation"],
+  ];
+  for (const [field, label] of fields) {
+    if (!headers.includes(field)) continue;
+    const tally = {};
+    for (const row of rows) {
+      const val = (row[field] || "").trim();
+      if (val) tally[val] = (tally[val] || 0) + 1;
+    }
+    const entries = Object.entries(tally).sort((a, b) => b[1] - a[1]);
+    if (!entries.length) continue;
+    lines.push(`• ${label}: ${entries.map(([v, c]) => `${v} (${c})`).join(", ")}`);
+  }
+
+  lines.push("\nWould you like to make any changes to the generated agents? Describe what you'd like to adjust, or say \"no changes\" to proceed.");
+  return lines.join("\n");
+}
+
 function formatCsvDownloadFilename(runId = "") {
   const safeRunId = String(runId || "")
     .trim()
@@ -1476,6 +1520,7 @@ function App() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [removingContextIds, setRemovingContextIds] = useState(() => new Set());
   const [clarifyState, setClarifyState] = useState(null);
+  const [editState, setEditState] = useState(null);
   const fileInputRef = useRef(null);
   const chatScrollRef = useRef(null);
   const composerShellRef = useRef(null);
@@ -2310,7 +2355,8 @@ function App() {
 
     const csvPayload = extractCsvPayload(plannerText);
     if (!csvPayload) return;
-    const sampleCount = parseCsvRecords(csvPayload).rows.length;
+    const { rows: csvRows, headers: csvHeaders } = parseCsvRecords(csvPayload);
+    const sampleCount = csvRows.length;
     const derivedGraph = buildNetworkGraphFromCsv(csvPayload);
     setGraphPanelGraph(derivedGraph && Array.isArray(derivedGraph.nodes) ? derivedGraph : null);
     setChatMessages((prev) => [
@@ -2327,6 +2373,79 @@ function App() {
       setIsGraphPanelOpen(true);
     }, 220);
 
+    const summaryMessage = buildCsvSummaryMessage(csvPayload);
+    if (summaryMessage) {
+      const csvRunId = csvHeaders.includes("run_id") ? String(csvRows[0]?.["run_id"] || "") : "";
+      setChatMessages((prev) => [
+        ...prev,
+        { id: createRuntimeId("assistant"), role: "assistant", content: summaryMessage }
+      ]);
+      setEditState({ csvPayload, runId: csvRunId });
+    }
+
+    if (shouldAutoScrollRef.current) {
+      window.requestAnimationFrame(() => scrollChatToBottom("auto"));
+    }
+  };
+
+  const runEditQuery = async (currentCsvPayload, changeRequest, assistantTurnId) => {
+    const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
+    const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
+    if (!plannerRequestUrl) throw new Error("Planner endpoint is not configured.");
+
+    const editSystemPrompt =
+      PLANNER_SYSTEM_PROMPT +
+      "\n\nEDIT MODE: You are modifying an existing agent CSV based on a change request.\n" +
+      "- Apply the requested changes to the CSV.\n" +
+      "- Return the COMPLETE updated CSV (all rows, including unchanged ones).\n" +
+      "- Keep the same column schema as the input.\n" +
+      "- Only modify what the change request specifies.";
+
+    const payload = {
+      model: PLANNER_MODEL_ID,
+      temperature: 0.2,
+      stream: true,
+      messages: [
+        { role: "system", content: editSystemPrompt },
+        {
+          role: "user",
+          content: `Here is the current agent CSV:\n\n${currentCsvPayload}\n\nModification request: ${changeRequest}`
+        }
+      ]
+    };
+
+    const plannerText = await streamPlannerReplyIntoMessage({
+      requestUrl: plannerRequestUrl,
+      payload,
+      assistantTurnId
+    });
+
+    const csvPayload = extractCsvPayload(plannerText);
+    if (!csvPayload) return;
+    const { rows: csvRows, headers: csvHeaders } = parseCsvRecords(csvPayload);
+    const sampleCount = csvRows.length;
+    const derivedGraph = buildNetworkGraphFromCsv(csvPayload);
+    setGraphPanelGraph(derivedGraph && Array.isArray(derivedGraph.nodes) ? derivedGraph : null);
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: createRuntimeId("assistant"),
+        role: "assistant",
+        content: `Updated to ${sampleCount} agent${sampleCount !== 1 ? "s" : ""}.\nPlugging into the Matrix...`,
+        uiType: "status-tooltip"
+      }
+    ]);
+
+    const summaryMessage = buildCsvSummaryMessage(csvPayload);
+    if (summaryMessage) {
+      const csvRunId = csvHeaders.includes("run_id") ? String(csvRows[0]?.["run_id"] || "") : "";
+      setChatMessages((prev) => [
+        ...prev,
+        { id: createRuntimeId("assistant"), role: "assistant", content: summaryMessage }
+      ]);
+      setEditState({ csvPayload, runId: csvRunId });
+    }
+
     if (shouldAutoScrollRef.current) {
       window.requestAnimationFrame(() => scrollChatToBottom("auto"));
     }
@@ -2335,6 +2454,61 @@ function App() {
   const handleComposerSubmit = async (event) => {
     event.preventDefault();
     const promptText = scenarioText.trim();
+
+    // If we're waiting for edit feedback after CSV generation
+    if (editState) {
+      if (!promptText) return;
+      const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
+      const noChangesPattern = /^(no|no changes?|looks? good|proceed|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah)\b/i;
+      if (noChangesPattern.test(promptText.trim())) {
+        setEditState(null);
+        setScenarioText("");
+        setChatMessages((prev) => [
+          ...prev,
+          userTurn,
+          { id: createRuntimeId("assistant"), role: "assistant", content: "Simulation started! Your agents are now active in the Matrix." }
+        ]);
+        return;
+      }
+
+      // If the prompt looks like a brand-new simulation request, exit edit mode
+      // and let the normal flow handle it (avoids sending old CSV + new scenario to model)
+      const wordCount = promptText.trim().split(/\s+/).length;
+      const containsSimulateKeyword = /\bsimulate\b|\bsimulation\b|\bhelp me\b/i.test(promptText);
+      const isNewSimulation = wordCount > 25 || containsSimulateKeyword;
+      if (isNewSimulation) {
+        setEditState(null);
+        // Fall through to normal submit flow below
+      } else {
+        const assistantPendingTurnId = createRuntimeId("assistant");
+        const { csvPayload: currentCsv } = editState;
+        setEditState(null);
+        setScenarioText("");
+        setIsSubmitting(true);
+        setChatMessages((prev) => [
+          ...prev,
+          userTurn,
+          { id: assistantPendingTurnId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, startedAtMs: Date.now() }
+        ]);
+        window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
+
+        try {
+          await runEditQuery(currentCsv, promptText, assistantPendingTurnId);
+        } catch (error) {
+          const failureTimeMs = Date.now();
+          setChatMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantPendingTurnId
+                ? { ...msg, content: `Edit request failed: ${error.message || "Unknown error."}`, pending: false, error: true, thinkingDurationSec: Math.max(0.1, (failureTimeMs - (typeof msg.startedAtMs === "number" ? msg.startedAtMs : failureTimeMs)) / 1000) }
+                : msg
+            )
+          );
+        } finally {
+          setIsSubmitting(false);
+        }
+        return;
+      }
+    }
 
     // If we're waiting for clarification answers, treat this as the user's reply
     if (clarifyState) {
