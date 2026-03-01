@@ -6,7 +6,6 @@ import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
 import downloadIcon from "../assets/icons/download.svg";
 import dropdownIcon from "../assets/icons/dropdown.svg";
-import micIcon from "../assets/icons/mic.svg";
 import waveformIcon from "../assets/icons/waveform.svg";
 import plannerSystemPromptRaw from "../../planner-system-prompt.txt?raw";
 
@@ -2264,7 +2263,7 @@ function App() {
     void startSpeechCapture();
   };
 
-  const hasTypedInput = scenarioText.trim().length > 0 && !isSpeechDrivenInput;
+  const hasTypedInput = scenarioText.trim().length > 0;
 
   useEffect(() => {
     const handleResize = () => {
@@ -3050,6 +3049,14 @@ function App() {
       stopSpeechCapture();
     }
     const promptText = scenarioTextRef.current.trim();
+    const filesForSubmit = contextFiles.filter((file) => !removingContextIds.has(file.id));
+
+    if (!promptText && filesForSubmit.length === 0) {
+      if (!isRecordingSpeech && !isTranscribingSpeech) {
+        void startSpeechCapture();
+      }
+      return;
+    }
 
     // If we're waiting for edit feedback after CSV generation
     if (editState) {
@@ -3171,9 +3178,6 @@ function App() {
       }
       return;
     }
-
-    const filesForSubmit = contextFiles.filter((file) => !removingContextIds.has(file.id));
-    if (!promptText && filesForSubmit.length === 0) return;
 
     if (isPlaceholderTypingActive) {
       setIsPlaceholderTypingActive(false);
@@ -3547,28 +3551,8 @@ function App() {
                   aria-label="Simulation scenario"
                 />
                 <button
-                  className={`composer-mic-btn ${isRecordingSpeech ? "recording" : ""}`}
-                  type="button"
-                  aria-label={
-                    isRecordingSpeech
-                      ? "Stop voice capture and transcribe"
-                      : "Start voice capture with speech-to-text"
-                  }
-                  title={
-                    isRecordingSpeech
-                      ? "Stop recording"
-                      : isTranscribingSpeech
-                        ? "Transcribing..."
-                        : "Voice input"
-                  }
-                  disabled={isSubmitting || isTranscribingSpeech}
-                  onClick={handleSpeechButtonClick}
-                >
-                  <img src={micIcon} alt="" />
-                </button>
-                <button
                   className={`send-btn composer-primary-action ${isRecordingSpeech ? "recording" : ""}`}
-                  type={hasTypedInput ? "submit" : "button"}
+                  type="submit"
                   aria-label={
                     hasTypedInput
                       ? "Submit simulation"
@@ -3577,7 +3561,6 @@ function App() {
                         : "Start voice capture with speech-to-text"
                   }
                   disabled={isSubmitting || isTranscribingSpeech}
-                  onClick={hasTypedInput ? undefined : handleSpeechButtonClick}
                 >
                   <img src={hasTypedInput ? arrowUpIcon : waveformIcon} alt="" />
                 </button>
