@@ -1,12 +1,33 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+import { fileURLToPath } from "url";
 
 const DEFAULT_PLANNER_MODEL_ENDPOINT = "";
 const DEFAULT_PLANNER_MODEL_ID = "deepseek-r1";
 const DEFAULT_PLANNER_PROXY_PATH = "/api/planner/chat";
 const DEFAULT_EXA_PROXY_PATH = "/api/exa/search";
 const DEFAULT_EXA_API_ENDPOINT = "";
+const configFilePath = fileURLToPath(import.meta.url);
+const frontendRootDir = path.dirname(configFilePath);
+const repoRootDir = path.resolve(frontendRootDir, "..");
+
+function mergedEnvForMode(mode) {
+  // Load repo-root env first, then frontend-local env overrides.
+  return {
+    ...loadEnv(mode, repoRootDir, ""),
+    ...loadEnv(mode, frontendRootDir, ""),
+  };
+}
+
+function viteClientDefineFromEnv(env) {
+  const defined = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!key.startsWith("VITE_")) continue;
+    defined[`import.meta.env.${key}`] = JSON.stringify(value);
+  }
+  return defined;
+}
 
 function plannerChatEndpointFor(baseOrEndpoint) {
   const trimmed = (baseOrEndpoint || "").trim().replace(/\/+$/, "");
@@ -338,11 +359,10 @@ function exaProxy(env) {
 }
 
 export default defineConfig(({ mode }) => {
-  const env = {
-    ...loadEnv(mode, path.resolve(process.cwd(), ".."), ""),
-    ...loadEnv(mode, process.cwd(), ""),
-  };
+  const env = mergedEnvForMode(mode);
   return {
+    envDir: repoRootDir,
+    define: viteClientDefineFromEnv(env),
     plugins: [react(), plannerLoggingProxy(env), exaProxy(env)],
     server: {
       proxy: {
