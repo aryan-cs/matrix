@@ -34,7 +34,13 @@ const CHAT_ENTER_TRANSITION_MS = 620;
 const CHAT_INITIAL_MESSAGE_STAGGER_MS = 500;
 const COMPOSER_DOCK_ANIMATION_MS = 680;
 const ARTIFACT_MODAL_EXIT_MS = 220;
-const THINKING_PLACEHOLDER_TEXT = "Performing matrix multiplications...";
+const THINKING_PLACEHOLDER_OPTIONS = [
+  "Performing matrix multiplications...",
+  "Determining...",
+  "ad - bc = ...",
+  "Grabbing attention...",
+  "Convoluting..."
+];
 const EXA_SUCCESS_PLACEHOLDER_TEXT = "";
 const EXA_FAILURE_PLACEHOLDER_TEXT = "Failed to search with Exa.";
 const STREAM_REVEAL_MIN_CHARS = 2;
@@ -131,6 +137,29 @@ const ALLOWED_EXTENSIONS = new Set([
 ]);
 const MAX_TOTAL_FILES = 200;
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+
+function pickThinkingPlaceholder() {
+  const index = Math.floor(Math.random() * THINKING_PLACEHOLDER_OPTIONS.length);
+  return THINKING_PLACEHOLDER_OPTIONS[index] || THINKING_PLACEHOLDER_OPTIONS[0];
+}
+
+function resolveThinkingPlaceholder(message) {
+  const explicit = String(message?.thinkingPlaceholder || "").trim();
+  if (explicit) return explicit;
+  const content = String(message?.content || "").trim();
+  if (THINKING_PLACEHOLDER_OPTIONS.includes(content)) return content;
+  return THINKING_PLACEHOLDER_OPTIONS[0];
+}
+
+function isThinkingPlaceholderMessage(message) {
+  if (!message?.pending) return false;
+  const content = String(message?.content || "").trim();
+  if (message?.uiType === "thinking-placeholder") {
+    const placeholder = resolveThinkingPlaceholder(message);
+    return !content || content === placeholder;
+  }
+  return THINKING_PLACEHOLDER_OPTIONS.includes(content);
+}
 
 function extensionFor(name) {
   const split = name.split(".");
@@ -845,20 +874,104 @@ function formatCsvDownloadFilename(runId = "") {
   return `${prefix}-${stamp}.csv`;
 }
 
+const NUMBER_WORD_LOOKUP = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+  sixty: 60,
+  seventy: 70,
+  eighty: 80,
+  ninety: 90,
+  hundred: 100,
+  thousand: 1000
+};
+
+function parseWordNumberToken(input) {
+  const normalized = String(input || "")
+    .toLowerCase()
+    .replace(/[^a-z\s-]/g, " ")
+    .replace(/-/g, " ")
+    .trim();
+  if (!normalized) return null;
+
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+
+  let total = 0;
+  let current = 0;
+
+  for (const token of tokens) {
+    const value = NUMBER_WORD_LOOKUP[token];
+    if (!Number.isFinite(value)) return null;
+
+    if (token === "hundred") {
+      current = (current || 1) * 100;
+      continue;
+    }
+
+    if (token === "thousand") {
+      total += (current || 1) * 1000;
+      current = 0;
+      continue;
+    }
+
+    current += value;
+  }
+
+  const result = total + current;
+  if (!Number.isFinite(result) || result <= 0) return null;
+  return result;
+}
+
 function extractRequestedSampleCountFromPrompt(promptText) {
   const text = String(promptText || "");
   if (!text) return null;
 
-  const patterns = [
-    /\bn\s*=\s*(\d{1,4})\b/i,
-    /\bwith\s+(\d{1,4})\s+(?:representatives?|agents?|samples?)\b/i,
-    /\b(\d{1,4})\s+(?:representatives?|agents?|samples?)\b/i
+  const numericPatterns = [
+    /\bn\s*=\s*([\d,]{1,9})\b/i,
+    /\bwith\s+([\d,]{1,9})\s+(?:representatives?|agents?|samples?)\b/i,
+    /\b([\d,]{1,9})\s+(?:representatives?|agents?|samples?)\b/i
   ];
 
-  for (const pattern of patterns) {
+  for (const pattern of numericPatterns) {
     const match = text.match(pattern);
     if (!match?.[1]) continue;
-    const count = Number.parseInt(match[1], 10);
+    const count = Number.parseInt(match[1].replaceAll(",", ""), 10);
+    if (Number.isFinite(count) && count > 0) {
+      return count;
+    }
+  }
+
+  const wordPatterns = [
+    /\bwith\s+([a-z]+(?:[-\s][a-z]+){0,3})\s+(?:representatives?|agents?|samples?)\b/i,
+    /\b([a-z]+(?:[-\s][a-z]+){0,3})\s+(?:representatives?|agents?|samples?)\b/i
+  ];
+
+  for (const pattern of wordPatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const count = parseWordNumberToken(match[1]);
     if (Number.isFinite(count) && count > 0) {
       return count;
     }
@@ -902,8 +1015,13 @@ function CsvArtifactCard({
 }) {
   const resolvedTotalCount =
     Number.isFinite(totalCount) && totalCount > 0 ? Math.max(1, Math.round(totalCount)) : null;
-  const generatedCount = summary?.rowCount ?? 0;
-  const progressLabel = resolvedTotalCount ? `${generatedCount}/${resolvedTotalCount} samples generated` : "";
+  const generatedCount = Number.isFinite(summary?.rowCount) ? Math.max(0, summary.rowCount) : 0;
+  const displayTotalCount = resolvedTotalCount
+    ? Math.max(resolvedTotalCount, generatedCount)
+    : generatedCount > 0
+      ? generatedCount
+      : null;
+  const progressLabel = `${generatedCount}/${displayTotalCount ?? "?"} samples generated`;
   const isInteractive = typeof onOpen === "function";
   const canDownload = typeof onDownload === "function";
   const downloadLabel = pending
@@ -928,7 +1046,7 @@ function CsvArtifactCard({
         <div className="csv-artifact-badge">CSV</div>
         <div className="csv-artifact-copy">
           <p className="csv-artifact-title">Generated Agent Data</p>
-          {progressLabel ? <p className="csv-artifact-meta">{progressLabel}</p> : null}
+          <p className="csv-artifact-meta">{progressLabel}</p>
         </div>
       </button>
       <button
@@ -1092,6 +1210,7 @@ function renderMessageContent(message, options = {}) {
   }
 
   const messageText = String(message.content || "");
+  const thinkingPlaceholderText = resolveThinkingPlaceholder(message);
   if (message.uiType === "status-tooltip") {
     return (
       <div className="chat-meta-log">
@@ -1123,12 +1242,12 @@ function renderMessageContent(message, options = {}) {
       </div>
     ) : null;
 
-  if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
+  if (isThinkingPlaceholderMessage(message)) {
     return (
       <>
         {exaMetaBlock}
         <div className="chat-meta-think">
-          <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
+          <p className="chat-thinking-placeholder">{thinkingPlaceholderText}</p>
         </div>
       </>
     );
@@ -1139,7 +1258,7 @@ function renderMessageContent(message, options = {}) {
   const hasThinkText = thinkText.trim().length > 0;
   const hasAnswerText = answerText.trim().length > 0;
   const thinkLabel = message.pending
-    ? THINKING_PLACEHOLDER_TEXT
+    ? thinkingPlaceholderText
     : thoughtDurationLabel(message.thinkingDurationSec);
   const primaryAnswerText = hasAnswerText ? answerText : messageText;
   const csvSummary = summarizeCsvArtifact(primaryAnswerText);
@@ -1153,14 +1272,16 @@ function renderMessageContent(message, options = {}) {
       ? message.requestedSampleCount
       : null;
   const shouldHoldPendingThinkingStyle =
-    Boolean(message.pending) && (hasThinkText || messageText.trim() === THINKING_PLACEHOLDER_TEXT) && !hasAnswerText;
+    Boolean(message.pending) &&
+    (hasThinkText || isThinkingPlaceholderMessage(message)) &&
+    !hasAnswerText;
 
   if (shouldHoldPendingThinkingStyle) {
     return (
       <>
         {exaMetaBlock}
         <div className="chat-meta-think">
-          <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
+          <p className="chat-thinking-placeholder">{thinkingPlaceholderText}</p>
         </div>
       </>
     );
@@ -1254,7 +1375,7 @@ function messageShouldRenderCsvArtifact(message) {
   if (message.uiType === "status-tooltip") return false;
 
   const messageText = String(message.content || "");
-  if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
+  if (isThinkingPlaceholderMessage(message)) {
     return false;
   }
 
@@ -1269,7 +1390,7 @@ function messageHasThinkSection(message) {
   if (message.uiType === "status-tooltip") return false;
 
   const messageText = String(message.content || "");
-  if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
+  if (isThinkingPlaceholderMessage(message)) {
     return false;
   }
 
@@ -2219,7 +2340,11 @@ function App() {
         setChatMessages((prev) =>
           prev.map((msg) =>
             msg.id === assistantTurnId
-              ? { ...msg, content: displayedText || THINKING_PLACEHOLDER_TEXT, pending: true }
+              ? {
+                  ...msg,
+                  content: displayedText || msg.thinkingPlaceholder || THINKING_PLACEHOLDER_OPTIONS[0],
+                  pending: true
+                }
               : msg
           )
         );
@@ -2523,6 +2648,7 @@ function App() {
 
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
       const assistantPendingTurnId = createRuntimeId("assistant");
+      const thinkingPlaceholder = pickThinkingPlaceholder();
 
       setClarifyState(null);
       setScenarioText("");
@@ -2533,8 +2659,10 @@ function App() {
         {
           id: assistantPendingTurnId,
           role: "assistant",
-          content: THINKING_PLACEHOLDER_TEXT,
+          content: thinkingPlaceholder,
           pending: true,
+          uiType: "thinking-placeholder",
+          thinkingPlaceholder,
           startedAtMs: Date.now(),
           requestedSampleCount
         }
@@ -2581,12 +2709,21 @@ function App() {
 
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText || "[No prompt provided]" };
       const clarifyMsgId = createRuntimeId("assistant");
+      const clarifyThinkingPlaceholder = pickThinkingPlaceholder();
       const requestedSampleCount = extractRequestedSampleCountFromPrompt(promptText);
 
       setChatMessages((prev) => [
         ...prev,
         userTurn,
-        { id: clarifyMsgId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, exaStatus: "searching" }
+        {
+          id: clarifyMsgId,
+          role: "assistant",
+          content: clarifyThinkingPlaceholder,
+          pending: true,
+          uiType: "thinking-placeholder",
+          thinkingPlaceholder: clarifyThinkingPlaceholder,
+          exaStatus: "searching"
+        }
       ]);
       setScenarioText("");
       window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
@@ -2649,13 +2786,16 @@ function App() {
       const cleanedClarifyText = stripThinkSections(clarifyText);
       if (cleanedClarifyText.trim().toUpperCase() === "NO_FOLLOWUPS") {
         const assistantPendingTurnId = createRuntimeId("assistant");
+        const generationThinkingPlaceholder = pickThinkingPlaceholder();
         setChatMessages((prev) => [
           ...prev.filter((m) => m.id !== clarifyMsgId),
           {
             id: assistantPendingTurnId,
             role: "assistant",
-            content: THINKING_PLACEHOLDER_TEXT,
+            content: generationThinkingPlaceholder,
             pending: true,
+            uiType: "thinking-placeholder",
+            thinkingPlaceholder: generationThinkingPlaceholder,
             startedAtMs: Date.now(),
             requestedSampleCount
           }
@@ -2680,13 +2820,16 @@ function App() {
       if (questionLines.length === 0) {
         // Timed out or failed — go straight to main response
         const assistantPendingTurnId = createRuntimeId("assistant");
+        const generationThinkingPlaceholder = pickThinkingPlaceholder();
         setChatMessages((prev) => [
           ...prev.filter((m) => m.id !== clarifyMsgId),
           {
             id: assistantPendingTurnId,
             role: "assistant",
-            content: THINKING_PLACEHOLDER_TEXT,
+            content: generationThinkingPlaceholder,
             pending: true,
+            uiType: "thinking-placeholder",
+            thinkingPlaceholder: generationThinkingPlaceholder,
             startedAtMs: Date.now(),
             requestedSampleCount
           }

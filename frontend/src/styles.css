@@ -150,6 +150,64 @@ input {
   cursor: grabbing;
 }
 
+.graph-panel-fab-stack {
+  position: absolute;
+  right: 14px;
+  bottom: 16px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: bottom 720ms var(--ease-slingshot);
+  will-change: bottom;
+}
+
+.graph-circle-canvas.terminal-open .graph-panel-fab-stack {
+  bottom: 212px;
+}
+
+.graph-panel-fab {
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition:
+    transform var(--motion-fast) var(--ease-spring),
+    background var(--motion-fast) var(--ease-soft),
+    box-shadow var(--motion-fast) var(--ease-soft);
+}
+
+.graph-panel-fab:hover {
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.graph-panel-fab:active {
+  transform: scale(0.96);
+}
+
+.graph-panel-fab:focus-visible {
+  outline: none;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    0 0 0 2px rgba(255, 255, 255, 0.24);
+}
+
+.graph-panel-fab img {
+  width: 20px;
+  height: 20px;
+  display: block;
+  object-fit: contain;
+  object-position: center;
+  pointer-events: none;
+}
+
 .graph-node-terminal {
   position: absolute;
   left: 0;
@@ -193,31 +251,60 @@ input {
   display: none;
 }
 
-.graph-node-terminal-text {
+.graph-node-terminal-profile {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.graph-node-terminal-name {
   margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  min-width: 0;
+  color: rgba(242, 242, 242, 0.95);
+  font-size: 0.98rem;
+  line-height: 1.2;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.graph-node-terminal-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+}
+
+.graph-node-terminal-column {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.graph-node-terminal-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
   color: rgba(225, 225, 225, 0.94);
-  font-size: 0.76rem;
-  line-height: 1.45;
-  letter-spacing: 0.01em;
+  font-size: 0.75rem;
+  line-height: 1.35;
   font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
-.graph-node-terminal-caret {
-  margin-left: 1px;
-  color: rgba(240, 240, 240, 0.9);
-  animation: graph-terminal-caret-blink 0.95s steps(1, end) infinite;
+.graph-node-terminal-key {
+  color: rgba(195, 195, 195, 0.9);
+  white-space: nowrap;
 }
 
-@keyframes graph-terminal-caret-blink {
-  0%, 46% {
-    opacity: 1;
-  }
-  47%, 100% {
-    opacity: 0;
-  }
+.graph-node-terminal-value {
+  min-width: 0;
+  color: rgba(236, 236, 236, 0.94);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @keyframes graph-panel-sling-in {

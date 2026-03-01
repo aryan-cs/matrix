@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import callIcon from "../../assets/icons/call.svg";
+import notesIcon from "../../assets/icons/notes.svg";
 
 function clampNodeRadius(count) {
   if (count <= 12) return 18;
@@ -22,36 +24,18 @@ const DETAIL_FIELDS = [
   ["home_address", "Location"]
 ];
 
-const TERMINAL_TYPE_INTERVAL_MS = 18;
-const TERMINAL_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const TERMINAL_SPINNER_INTERVAL_MS = 110;
-const SUMMARY_DEFAULT_MODEL_ENDPOINT = "";
-const SUMMARY_DEFAULT_MODEL_ID = "deepseek-r1";
-const SUMMARY_DEFAULT_PROXY_PATH = "/api/planner/chat";
-
-const SUMMARY_MODEL_ENDPOINT = (
-  import.meta.env.VITE_PLANNER_CONTEXT_ENDPOINT ||
-  import.meta.env.VITE_PLANNER_MODEL_ENDPOINT ||
-  SUMMARY_DEFAULT_MODEL_ENDPOINT
-).trim();
-const SUMMARY_MODEL_ID = (import.meta.env.VITE_PLANNER_MODEL_ID || SUMMARY_DEFAULT_MODEL_ID).trim();
-const SUMMARY_API_KEY = (import.meta.env.VITE_PLANNER_API_KEY || "").trim();
-const SUMMARY_PROXY_PATH = (
-  import.meta.env.VITE_PLANNER_PROXY_PATH || SUMMARY_DEFAULT_PROXY_PATH
-).trim();
-const USE_SUMMARY_PROXY =
-  import.meta.env.DEV && import.meta.env.VITE_USE_PLANNER_PROXY !== "false";
-
-function plannerChatEndpointFor(baseOrEndpoint) {
-  const trimmed = (baseOrEndpoint || "").trim().replace(/\/+$/, "");
-  if (!trimmed) return "";
-  if (trimmed.endsWith("/v1/chat/completions")) return trimmed;
-  return `${trimmed}/v1/chat/completions`;
+function formatDetailValue(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized || "—";
 }
 
-function buildNodeSummaryContext(selectedNode, nodeById, adjacencyById) {
-  if (!selectedNode) return null;
+function buildNodeDetailRows(selectedNode, nodeById, adjacencyById) {
+  if (!selectedNode) return [];
 
+  const metadata =
+    selectedNode.metadata && typeof selectedNode.metadata === "object"
+      ? selectedNode.metadata
+      : {};
   const preferredConnections = Array.isArray(selectedNode.connections)
     ? selectedNode.connections
     : [];
@@ -65,169 +49,23 @@ function buildNodeSummaryContext(selectedNode, nodeById, adjacencyById) {
         .filter((id) => id && id !== selectedNode.id)
     )
   );
-  const connectionNames =
-    connectionIds.length > 0
-      ? connectionIds.map((id) => nodeById.get(id)?.label || id)
-      : ["No direct connections listed."];
+  const connectionNames = connectionIds.map((id) => nodeById.get(id)?.label || id);
 
-  const metadata =
-    selectedNode.metadata && typeof selectedNode.metadata === "object"
-      ? selectedNode.metadata
-      : {};
-
-  const lines = [];
-  lines.push(`> agent_id: ${selectedNode.id}`);
-  lines.push(`> name: ${selectedNode.label || selectedNode.id}`);
-
+  const detailRows = [{ key: "agent_id", label: "Agent ID", value: selectedNode.id }];
   for (const [key, label] of DETAIL_FIELDS) {
-    const value = String(metadata[key] ?? "").trim();
-    if (!value) continue;
-    lines.push(`${label}: ${value}`);
+    detailRows.push({
+      key,
+      label,
+      value: formatDetailValue(metadata[key])
+    });
   }
-
-  return {
-    agent_id: selectedNode.id,
-    name: selectedNode.label || selectedNode.id,
-    metadata,
-    connection_names: connectionNames,
-    display_lines: lines
-  };
-}
-
-function buildFallbackSummary(context) {
-  if (!context) return "";
-
-  const metadata = context.metadata || {};
-  const age = String(metadata.age || "").trim();
-  const occupation = String(metadata.occupation || "").trim();
-  const segment = String(metadata.segment_key || "").trim();
-  const politicalLean = String(metadata.political_lean || "").trim();
-  const priorities = String(metadata.policy_priorities || "").trim();
-  const connections = Array.isArray(context.connection_names) ? context.connection_names : [];
-
-  const line1Parts = [
-    context.name,
-    age ? `(${age})` : "",
-    occupation ? `is a ${occupation}` : "is a representative agent",
-    segment ? `in ${segment.replaceAll("_", " ")}` : ""
-  ].filter(Boolean);
-  const line2Parts = [
-    politicalLean ? `Lean: ${politicalLean}.` : "",
-    priorities ? `Priorities: ${priorities}.` : "",
-    connections.length > 0
-      ? `Likely talks with: ${connections.slice(0, 4).join(", ")}.`
-      : "No direct network links were provided."
-  ].filter(Boolean);
-
-  const line1 = `> ${line1Parts.join(" ").replace(/\s+/g, " ").trim()}.`;
-  const line2 = `> ${line2Parts.join(" ").replace(/\s+/g, " ").trim()}`;
-  return `${line1}\n${line2}`;
-}
-
-function extractPostThinkText(text) {
-  const raw = String(text || "").replace(/\r\n/g, "\n");
-  if (!raw) return "";
-
-  const closeTagRegex = /<\/think\s*>/gi;
-  let lastCloseEnd = -1;
-  let closeMatch = closeTagRegex.exec(raw);
-  while (closeMatch) {
-    lastCloseEnd = closeTagRegex.lastIndex;
-    closeMatch = closeTagRegex.exec(raw);
-  }
-
-  if (lastCloseEnd !== -1) {
-    return raw.slice(lastCloseEnd).trim();
-  }
-
-  // Fallback: remove any think blocks/tags if present, then return remaining text.
-  return raw
-    .replace(/<think\s*>[\s\S]*?<\/think\s*>/gi, "")
-    .replace(/<think\s*>[\s\S]*$/gi, "")
-    .replace(/<\/?think\s*>/gi, "")
-    .trim();
-}
-
-function normalizeTwoLineSummary(summaryText, fallbackText) {
-  const fallbackLines = String(fallbackText || "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const rawLines = String(summaryText || "")
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => line.trim().replace(/^[-*>\d.\)\s]+/, ""))
-    .filter(Boolean);
-
-  let lines = rawLines.slice(0, 2);
-  if (lines.length < 2) {
-    const sentenceSplit = String(summaryText || "")
-      .replace(/\s+/g, " ")
-      .split(/(?<=[.!?])\s+/)
-      .map((part) => part.trim())
-      .filter(Boolean);
-    lines = sentenceSplit.slice(0, 2);
-  }
-  if (lines.length < 2) {
-    lines = fallbackLines.map((line) => line.replace(/^>\s*/, "")).slice(0, 2);
-  }
-  if (lines.length === 1) {
-    lines.push("Summary unavailable.");
-  }
-  const joinedSummary = lines
-    .slice(0, 2)
-    .map((line) => String(line || "").trim())
-    .filter(Boolean)
-    .join("  |  ");
-  return `> ${joinedSummary}`;
-}
-
-async function generateNodeSummaryWithLlm(context, signal) {
-  const plannerEndpoint = plannerChatEndpointFor(SUMMARY_MODEL_ENDPOINT);
-  const requestUrl = USE_SUMMARY_PROXY ? SUMMARY_PROXY_PATH : plannerEndpoint;
-  if (!requestUrl) {
-    throw new Error("Planner endpoint is not configured.");
-  }
-
-  const payload = {
-    model: SUMMARY_MODEL_ID,
-    temperature: 0.2,
-    stream: false,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You summarize one simulated representative profile in exactly 2 lines. Keep each line concise, plain text, no markdown lists, no bullets, no numbering, no preamble, and no reasoning text."
-      },
-      {
-        role: "user",
-        content:
-          "Using this node context, write exactly 2 lines that summarize this person and their network relevance.\n\n" +
-          JSON.stringify(context, null, 2)
-      }
-    ]
-  };
-
-  const response = await fetch(requestUrl, {
-    signal,
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(!USE_SUMMARY_PROXY && SUMMARY_API_KEY
-        ? { Authorization: `Bearer ${SUMMARY_API_KEY}` }
-        : {})
-    },
-    body: JSON.stringify(payload)
+  detailRows.push({
+    key: "connected_nodes",
+    label: "Connected Nodes",
+    value: connectionNames.length > 0 ? connectionNames.join(", ") : "—"
   });
 
-  if (!response.ok) {
-    throw new Error(`Summary endpoint responded ${response.status}`);
-  }
-
-  const parsed = await response.json();
-  const rawContent = String(parsed?.choices?.[0]?.message?.content || "").trim();
-  const postThinkContent = extractPostThinkText(rawContent);
-  return postThinkContent || rawContent;
+  return detailRows;
 }
 
 function normalizeGraphData(graph) {
@@ -334,16 +172,10 @@ function clamp(value, min, max) {
 
 function GraphCirclePanel({ graph = null }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
-  const [terminalText, setTerminalText] = useState("");
-  const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
-  const [summaryCache, setSummaryCache] = useState({});
-  const [summaryLoading, setSummaryLoading] = useState({});
   const selectedNodeIdRef = useRef("");
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
-  const terminalScrollRef = useRef(null);
-  const summaryRequestSeqRef = useRef(0);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -360,12 +192,19 @@ function GraphCirclePanel({ graph = null }) {
     }
     return adjacency;
   }, [graphData]);
-  const terminalTargetText = useMemo(() => {
-    const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) : null;
-    if (!selectedNode) return "";
-    return summaryCache[selectedNodeId] || "";
-  }, [selectedNodeId, nodeById, summaryCache]);
-  const isSummaryPending = Boolean(selectedNodeId && !summaryCache[selectedNodeId]);
+  const selectedNode = useMemo(
+    () => (selectedNodeId ? nodeById.get(selectedNodeId) || null : null),
+    [selectedNodeId, nodeById]
+  );
+  const selectedNodeDetails = useMemo(
+    () => buildNodeDetailRows(selectedNode, nodeById, adjacencyById),
+    [selectedNode, nodeById, adjacencyById]
+  );
+  const detailColumns = useMemo(() => {
+    if (selectedNodeDetails.length === 0) return [[], []];
+    const midpoint = Math.ceil(selectedNodeDetails.length / 2);
+    return [selectedNodeDetails.slice(0, midpoint), selectedNodeDetails.slice(midpoint)];
+  }, [selectedNodeDetails]);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -376,92 +215,6 @@ function GraphCirclePanel({ graph = null }) {
       setSelectedNodeId("");
     }
   }, [selectedNodeId, nodeById]);
-
-  useEffect(() => {
-    const activeNodeId = selectedNodeId;
-    const selectedNode = activeNodeId ? nodeById.get(activeNodeId) : null;
-    if (!selectedNode || summaryCache[activeNodeId] || summaryLoading[activeNodeId]) {
-      return undefined;
-    }
-
-    const context = buildNodeSummaryContext(selectedNode, nodeById, adjacencyById);
-    const fallbackSummary = buildFallbackSummary(context);
-    const requestSeq = summaryRequestSeqRef.current + 1;
-    summaryRequestSeqRef.current = requestSeq;
-    const controller = new AbortController();
-
-    setSummaryLoading((prev) => ({ ...prev, [activeNodeId]: true }));
-
-    (async () => {
-      try {
-        const rawSummary = await generateNodeSummaryWithLlm(context, controller.signal);
-        if (controller.signal.aborted) return;
-        if (summaryRequestSeqRef.current !== requestSeq) return;
-        const normalized = normalizeTwoLineSummary(rawSummary, fallbackSummary);
-        setSummaryCache((prev) => ({ ...prev, [activeNodeId]: normalized }));
-      } catch {
-        if (controller.signal.aborted) return;
-        if (summaryRequestSeqRef.current !== requestSeq) return;
-        setSummaryCache((prev) => ({ ...prev, [activeNodeId]: fallbackSummary }));
-      } finally {
-        setSummaryLoading((prev) => ({ ...prev, [activeNodeId]: false }));
-      }
-    })();
-
-    return () => {
-      controller.abort();
-      setSummaryLoading((prev) => ({ ...prev, [activeNodeId]: false }));
-    };
-  }, [selectedNodeId, nodeById, adjacencyById, summaryCache]);
-
-  useEffect(() => {
-    if (!isSummaryPending) return undefined;
-
-    setSpinnerFrameIndex(0);
-    const timerId = window.setInterval(() => {
-      setSpinnerFrameIndex((prev) => (prev + 1) % TERMINAL_SPINNER_FRAMES.length);
-    }, TERMINAL_SPINNER_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(timerId);
-    };
-  }, [isSummaryPending]);
-
-  useEffect(() => {
-    if (!selectedNodeId || !terminalTargetText) {
-      setTerminalText("");
-      return undefined;
-    }
-
-    let charIndex = 0;
-    setTerminalText("");
-
-    const timerId = window.setInterval(() => {
-      const remaining = terminalTargetText.length - charIndex;
-      if (remaining <= 0) {
-        window.clearInterval(timerId);
-        return;
-      }
-
-      const step = Math.max(1, Math.min(3, Math.ceil(remaining / 36)));
-      charIndex = Math.min(terminalTargetText.length, charIndex + step);
-      setTerminalText(terminalTargetText.slice(0, charIndex));
-
-      if (charIndex >= terminalTargetText.length) {
-        window.clearInterval(timerId);
-      }
-    }, TERMINAL_TYPE_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(timerId);
-    };
-  }, [selectedNodeId, terminalTargetText]);
-
-  useEffect(() => {
-    const terminalNode = terminalScrollRef.current;
-    if (!terminalNode) return;
-    terminalNode.scrollTop = terminalNode.scrollHeight;
-  }, [terminalText]);
 
   useEffect(() => {
     const stageNode = stageRef.current;
@@ -487,6 +240,7 @@ function GraphCirclePanel({ graph = null }) {
       rotationY: 0.42,
       velocityX: 0,
       velocityY: 0,
+      edgeDashOffset: 0,
       activePointerId: null,
       isDragging: false,
       dragDistanceSq: 0,
@@ -678,14 +432,20 @@ function GraphCirclePanel({ graph = null }) {
         if (!source || !target) continue;
 
         const avgDepth = (source.depth + target.depth) * 0.5;
+        const dashSize = 3.5 + avgDepth * 2.4;
+        const gapSize = 6 + (1 - avgDepth) * 2.2;
 
         context.beginPath();
+        context.setLineDash([dashSize, gapSize]);
+        context.lineDashOffset = -(engine.edgeDashOffset + avgDepth * 8);
         context.moveTo(source.x, source.y);
         context.lineTo(target.x, target.y);
         context.strokeStyle = `rgba(255, 255, 255, ${0.08 + avgDepth * 0.2})`;
         context.lineWidth = 0.75 + avgDepth * 0.9;
         context.stroke();
       }
+      context.setLineDash([]);
+      context.lineDashOffset = 0;
 
       const sortedNodes = [...engine.nodes].sort((left, right) => left.z - right.z);
       for (const node of sortedNodes) {
@@ -749,6 +509,7 @@ function GraphCirclePanel({ graph = null }) {
         if (Math.abs(engine.velocityX) < 0.000004) engine.velocityX = 0;
         if (Math.abs(engine.velocityY) < 0.000004) engine.velocityY = 0;
       }
+      engine.edgeDashOffset += 0.18;
 
       draw();
       engine.rafId = window.requestAnimationFrame(animate);
@@ -809,30 +570,39 @@ function GraphCirclePanel({ graph = null }) {
         ) : null}
         <canvas ref={canvasRef} className="graph-circle-canvas-element" />
       </div>
+      <div className="graph-panel-fab-stack" aria-label="Graph actions">
+        <button type="button" className="graph-panel-fab" aria-label="Call">
+          <img src={callIcon} alt="" />
+        </button>
+        <button type="button" className="graph-panel-fab" aria-label="Notes">
+          <img src={notesIcon} alt="" />
+        </button>
+      </div>
       <div
         className={`graph-node-terminal ${isTerminalOpen ? "open" : ""}`}
         aria-hidden={!isTerminalOpen}
       >
-        <div className="graph-node-terminal-scroll" ref={terminalScrollRef}>
-          <pre className="graph-node-terminal-text">
-            {isSummaryPending ? (
-              <>
-                {`$ Loading profile summary... ${TERMINAL_SPINNER_FRAMES[spinnerFrameIndex]}`}
-                <span className="graph-node-terminal-caret" aria-hidden="true">
-                  ▋
-                </span>
-              </>
-            ) : (
-              <>
-                {terminalText}
-                {isTerminalOpen && terminalText.length < terminalTargetText.length ? (
-                  <span className="graph-node-terminal-caret" aria-hidden="true">
-                    ▋
-                  </span>
-                ) : null}
-              </>
-            )}
-          </pre>
+        <div className="graph-node-terminal-scroll">
+          <div className="graph-node-terminal-profile">
+            <p className="graph-node-terminal-name">{selectedNode?.label || selectedNodeId}</p>
+            <div className="graph-node-terminal-grid">
+              {detailColumns.map((column, columnIndex) => (
+                <div className="graph-node-terminal-column" key={`detail-column-${columnIndex}`}>
+                  {column.map((detailRow, rowIndex) => (
+                    <div
+                      className="graph-node-terminal-row"
+                      key={`detail-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
+                    >
+                      <span className="graph-node-terminal-key">{detailRow.label}</span>
+                      <span className="graph-node-terminal-value" title={detailRow.value}>
+                        {detailRow.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>
