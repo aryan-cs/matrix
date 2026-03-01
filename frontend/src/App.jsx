@@ -808,23 +808,122 @@ function formatCsvDownloadFilename(runId = "") {
 function extractRequestedSampleCountFromPrompt(promptText) {
   const text = String(promptText || "");
   if (!text) return null;
+  const sampleNounPattern =
+    "(?:representatives?|agents?|samples?|residents?|citizens?|people|persons?|individuals?|voters?|households?|respondents?|personas?|profiles?)";
 
-  const patterns = [
-    /\bn\s*=\s*(\d{1,4})\b/i,
-    /\bwith\s+(\d{1,4})\s+(?:representatives?|agents?|samples?)\b/i,
-    /\b(\d{1,4})\s+(?:representatives?|agents?|samples?)\b/i
+  const numericPatterns = [
+    /\bn\s*=\s*([\d,]{1,9})\b/i,
+    new RegExp(`\\bwith\\s+([\\d,]{1,9})\\s+${sampleNounPattern}\\b`, "i"),
+    new RegExp(`\\b([\\d,]{1,9})\\s+${sampleNounPattern}\\b`, "i"),
+    /\bsimulat(?:e|ion)\b[\s\S]{0,120}?\bwith\s+([\d,]{1,9})\b/i
   ];
 
-  for (const pattern of patterns) {
+  for (const pattern of numericPatterns) {
     const match = text.match(pattern);
     if (!match?.[1]) continue;
-    const count = Number.parseInt(match[1], 10);
+    const count = Number.parseInt(match[1].replaceAll(",", ""), 10);
+    if (Number.isFinite(count) && count > 0) {
+      return count;
+    }
+  }
+
+  const wordPatterns = [
+    new RegExp(`\\bwith\\s+([a-z]+(?:[-\\s][a-z]+){0,3})\\s+${sampleNounPattern}\\b`, "i"),
+    new RegExp(`\\b([a-z]+(?:[-\\s][a-z]+){0,3})\\s+${sampleNounPattern}\\b`, "i"),
+    /\bsimulat(?:e|ion)\b[\s\S]{0,120}?\bwith\s+([a-z]+(?:[-\s][a-z]+){0,3})\b/i
+  ];
+
+  for (const pattern of wordPatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const count = parseWordNumberToken(match[1]);
     if (Number.isFinite(count) && count > 0) {
       return count;
     }
   }
 
   return null;
+}
+
+function parseCountToken(token) {
+  const normalized = String(token || "").trim();
+  if (!normalized) return null;
+  const numeric = Number.parseInt(normalized.replaceAll(",", ""), 10);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  return parseWordNumberToken(normalized);
+}
+
+function inferEditTargetSampleCount(currentCsvPayload, changeRequest) {
+  const currentCount = parseCsvRecords(currentCsvPayload).rows.length;
+  const text = String(changeRequest || "").trim();
+  if (!text) return currentCount > 0 ? currentCount : null;
+  const sampleNounPattern =
+    "(?:representatives?|agents?|samples?|residents?|citizens?|people|persons?|individuals?|voters?|households?|respondents?|personas?|profiles?)";
+
+  const absolutePatterns = [
+    new RegExp(
+      `\\b(?:set|make|update|change|do|use|keep|have)\\s+(?:it\\s+)?(?:to|at)?\\s*([a-z0-9,\\s-]{1,40})\\s+${sampleNounPattern}\\b`,
+      "i"
+    ),
+    new RegExp(
+      `\\b(?:total(?:\\s+of)?|exactly|at)\\s+([a-z0-9,\\s-]{1,40})\\s+${sampleNounPattern}\\b`,
+      "i"
+    )
+  ];
+
+  for (const pattern of absolutePatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const parsed = parseCountToken(match[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  const directRequestedCount = extractRequestedSampleCountFromPrompt(text);
+  if (Number.isFinite(directRequestedCount) && directRequestedCount > 0) {
+    const relativeVerbPattern = /\b(add|increase|expand|append|include|generate|remove|delete|drop|reduce|decrease|cut)\b/i;
+    const relativeQualifierPattern = /\b(more|fewer|less)\b/i;
+    if (!relativeVerbPattern.test(text) && !relativeQualifierPattern.test(text)) {
+      return directRequestedCount;
+    }
+  }
+
+  const addPatterns = [
+    new RegExp(
+      `\\b(?:add|increase|expand|append|include|generate)\\s+([a-z0-9,\\s-]{1,40})\\s+(?:more\\s+)?${sampleNounPattern}\\b`,
+      "i"
+    ),
+    new RegExp(`\\b([a-z0-9,\\s-]{1,40})\\s+more\\s+${sampleNounPattern}\\b`, "i")
+  ];
+  for (const pattern of addPatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const parsed = parseCountToken(match[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, currentCount + parsed);
+    }
+  }
+
+  const removePatterns = [
+    new RegExp(
+      `\\b(?:remove|delete|drop|reduce|decrease|cut)\\s+([a-z0-9,\\s-]{1,40})\\s+${sampleNounPattern}\\b`,
+      "i"
+    ),
+    new RegExp(`\\b([a-z0-9,\\s-]{1,40})\\s+fewer\\s+${sampleNounPattern}\\b`, "i"),
+    /\bless\s+by\s+([a-z0-9,\s-]{1,40})\b/i
+  ];
+  for (const pattern of removePatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const parsed = parseCountToken(match[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, currentCount - parsed);
+    }
+  }
+
+  // Fallback for vague edit prompts: keep previous total as expected target.
+  return currentCount > 0 ? currentCount : null;
 }
 
 function downloadCsvArtifact(csvPayload, runId = "") {
@@ -890,8 +989,15 @@ function CsvArtifactCard({
 }) {
   const resolvedTotalCount =
     Number.isFinite(totalCount) && totalCount > 0 ? Math.max(1, Math.round(totalCount)) : null;
-  const generatedCount = summary?.rowCount ?? 0;
-  const progressLabel = resolvedTotalCount ? `${generatedCount}/${resolvedTotalCount} samples generated` : "";
+  const generatedCount = Number.isFinite(summary?.rowCount) ? Math.max(0, summary.rowCount) : 0;
+  const displayTotalCount = resolvedTotalCount
+    ? Math.max(resolvedTotalCount, generatedCount)
+    : pending
+      ? null
+      : generatedCount > 0
+        ? generatedCount
+        : null;
+  const progressLabel = `${generatedCount}/${displayTotalCount ?? "?"} samples generated`;
   const isInteractive = typeof onOpen === "function";
   const canDownload = typeof onDownload === "function";
   const downloadLabel = pending
