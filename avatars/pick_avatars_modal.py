@@ -1,9 +1,17 @@
 import os
 import json
 import time
+import csv
 from pathlib import Path
-import pandas as pd
-import requests
+
+try:
+    import pandas as pd
+except Exception:  # pragma: no cover - optional dependency
+    pd = None
+try:
+    import requests
+except Exception:  # pragma: no cover - optional dependency
+    requests = None
 
 # ---------- Inputs ----------
 HERE = Path(__file__).resolve().parent
@@ -191,10 +199,42 @@ def deterministic_pick_avatar(agent: dict, candidates: list[dict]) -> dict:
         "reason": reason,
     }
 
+
+def is_live_avatar_match(agent: dict, avatar: dict) -> tuple[bool, str]:
+    profile = avatar.get("manual_profile") or {}
+    avatar_gender = profile.get("gender", "unknown")
+    avatar_ethnicities = profile.get("ethnicities") or set()
+    avatar_age_group = profile.get("age_group", "unknown")
+
+    agent_gender = agent.get("gender", "unknown")
+    agent_ethnicity = agent.get("ethnicity", "unknown")
+    agent_age_bucket = agent.get("age_bucket", "unknown")
+
+    if agent_gender not in {"male", "female"} or avatar_gender not in {"male", "female"}:
+        return False, "Gender unavailable for strict live-avatar match."
+    if agent_gender != avatar_gender:
+        return False, "Gender mismatch."
+
+    if agent_ethnicity in {"unknown", "other"} or not avatar_ethnicities:
+        return False, "Ethnicity unavailable for strict live-avatar match."
+    if agent_ethnicity not in avatar_ethnicities:
+        return False, "Ethnicity mismatch."
+
+    valid_buckets = AGE_GROUP_TO_BUCKETS.get(avatar_age_group, set())
+    if agent_age_bucket == "unknown" or not valid_buckets:
+        return False, "Age unavailable for strict live-avatar match."
+    if agent_age_bucket not in valid_buckets:
+        return False, "Age bucket mismatch."
+
+    return True, "Matched gender, ethnicity, and rough age bucket."
+
 def fallback_pick_avatar(agent: dict, candidates: list[dict]) -> dict:
     return deterministic_pick_avatar(agent, candidates)
 
 def modal_chat_json(messages, response_format=None, max_tokens=300):
+    if requests is None:
+        raise RuntimeError("requests is required when USE_MODAL_PICKER=1.")
+
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"
@@ -305,50 +345,114 @@ def pick_avatar(agent: dict, candidates: list[dict]) -> dict:
 
     return obj
 
+
+def iter_agent_rows(csv_path: Path) -> list[dict]:
+    if pd is not None:
+        df = pd.read_csv(csv_path)
+        return [r.to_dict() for _, r in df.iterrows()]
+
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
 def main():
     print(f"Using agents CSV: {AGENTS_CSV}")
     print(f"Using avatar catalog: {AVATAR_CATALOG_JSON}")
     print(f"Using model endpoint: {CHAT_URL}")
     print(f"Use Modal picker: {USE_MODAL_PICKER}")
 
-    df = pd.read_csv(AGENTS_CSV)
+    rows = iter_agent_rows(AGENTS_CSV)
     catalog = load_catalog()
 
+    # Recompute mapping each run so uniqueness constraints are enforced globally.
     mapping = {}
-    if OUT_MAP_JSON.exists():
-        mapping = json.loads(OUT_MAP_JSON.read_text(encoding="utf-8"))
+    used_video_avatar_ids: set[str] = set()
 
-    for _, r in df.iterrows():
-        row = r.to_dict()
+    for row in rows:
         agent_id = norm(row.get("agent_id"))
-        if not agent_id or agent_id in mapping:
+        if not agent_id:
             continue
 
         agent = summarize_agent(row)
         candidates = filter_candidates(agent, catalog)
-        try:
-            pick = pick_avatar(agent, candidates)
-        except Exception as e:
-            print(f"[ERROR] {agent_id}: avatar selection failed: {e}")
-            continue
+        eligible_video = []
+        for cand in candidates:
+            if cand.get("id") in used_video_avatar_ids:
+                continue
+            ok, why = is_live_avatar_match(agent, cand)
+            if ok:
+                eligible_video.append(cand)
 
-        chosen = next(a for a in catalog if a["id"] == pick["avatar_id"])
-        dv = chosen.get("default_voice") or {}
+        if eligible_video:
+            try:
+                pick = pick_avatar(agent, eligible_video)
+            except Exception as e:
+                print(f"[ERROR] {agent_id}: avatar selection failed: {e}")
+                pick = None
 
-        mapping[agent_id] = {
-            "avatar_id": chosen["id"],
-            "avatar_name": chosen.get("name"),
-            "default_voice_id": dv.get("id"),
-            "default_voice_name": dv.get("name"),
-            "confidence": float(pick.get("confidence", 0.5)),
-            "reason": pick.get("reason", ""),
-            "agent_gender": agent["gender"],
-            "agent_age_bucket": agent["age_bucket"],
-            "agent_ethnicity": agent["ethnicity"],
-        }
+            chosen = None
+            if pick:
+                chosen = next((a for a in eligible_video if a["id"] == pick.get("avatar_id")), None)
+            if chosen is None:
+                chosen = eligible_video[0]
+                pick = {
+                    "avatar_id": chosen["id"],
+                    "confidence": 0.7,
+                    "reason": "Fallback to first eligible strict-match avatar.",
+                }
+
+            dv = chosen.get("default_voice") or {}
+            used_video_avatar_ids.add(chosen["id"])
+            mapping[agent_id] = {
+                "live_video_enabled": True,
+                "live_avatar_enabled": True,
+                "avatar_id": chosen["id"],
+                "avatar_name": chosen.get("name"),
+                "default_voice_id": dv.get("id"),
+                "default_voice_name": dv.get("name"),
+                "confidence": float(pick.get("confidence", 0.5)),
+                "reason": pick.get("reason", ""),
+                "agent_gender": agent["gender"],
+                "agent_age_bucket": agent["age_bucket"],
+                "agent_ethnicity": agent["ethnicity"],
+            }
+            print(f"{agent_id} -> LIVE_VIDEO {chosen.get('name')} ({mapping[agent_id]['confidence']:.2f})")
+        else:
+            # No unique strict video match. Still assign avatar+voice so the agent can speak.
+            voice_candidates = candidates if candidates else catalog
+            try:
+                pick = pick_avatar(agent, voice_candidates)
+            except Exception as e:
+                print(f"[ERROR] {agent_id}: voice-avatar selection failed: {e}")
+                pick = None
+
+            chosen = None
+            if pick:
+                chosen = next((a for a in voice_candidates if a["id"] == pick.get("avatar_id")), None)
+            if chosen is None:
+                chosen = voice_candidates[0]
+                pick = {
+                    "avatar_id": chosen["id"],
+                    "confidence": 0.55,
+                    "reason": "Fallback to first candidate for voice-only mode.",
+                }
+
+            dv = chosen.get("default_voice") or {}
+            mapping[agent_id] = {
+                "live_video_enabled": False,
+                "live_avatar_enabled": False,
+                "avatar_id": chosen["id"],
+                "avatar_name": chosen.get("name"),
+                "default_voice_id": dv.get("id"),
+                "default_voice_name": dv.get("name"),
+                "confidence": float(pick.get("confidence", 0.5)),
+                "reason": "Voice assigned. Live video disabled because no unassigned strict match; using generated photo.",
+                "agent_gender": agent["gender"],
+                "agent_age_bucket": agent["age_bucket"],
+                "agent_ethnicity": agent["ethnicity"],
+            }
+            print(f"{agent_id} -> VOICE_ONLY {chosen.get('name')} ({mapping[agent_id]['confidence']:.2f})")
 
         OUT_MAP_JSON.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
-        print(f"{agent_id} -> {chosen.get('name')} ({mapping[agent_id]['confidence']:.2f})")
 
     print(f"\nWrote {OUT_MAP_JSON} for {len(mapping)} agents")
 

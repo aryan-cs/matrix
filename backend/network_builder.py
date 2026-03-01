@@ -45,9 +45,14 @@ _sanitize_ssl_env_paths()
 
 import asyncio
 import csv
+import base64
 import io
 import json
 import re
+import subprocess
+import sys
+import threading
+import time
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -56,7 +61,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 
@@ -78,7 +83,7 @@ TEXT_EXTENSIONS = {
     ".log",
 }
 DEFAULT_PLANNER_ENDPOINT = (
-    "https://aryan-cs--deepseek-r1-32b-openai-server.modal.run/v1/chat/completions"
+    "https://jajooananya--deepseek-r1-32b-deepseekserver-openai-server.modal.run/v1/chat/completions"
 )
 DEFAULT_PLANNER_MODEL_ID = "deepseek-r1"
 PLANNER_CONTEXT_MAX_TOTAL_CHARS = 26000
@@ -88,6 +93,10 @@ DEFAULT_AGENTS_CSV_PATH = Path(__file__).resolve().parent.parent / "backend-test
 DEFAULT_AGENT_TO_AVATAR_PATH = (
     Path(__file__).resolve().parent.parent / "avatars" / "agent_to_avatar.json"
 )
+DEFAULT_PORTRAITS_INDEX_PATH = (
+    Path(__file__).resolve().parent.parent / "backend-test" / "out_images" / "index.json"
+)
+DEFAULT_PORTRAITS_DIR = Path(__file__).resolve().parent.parent / "backend-test" / "out_images"
 
 
 class GraphBuildRequest(BaseModel):
@@ -128,10 +137,23 @@ class PlannerContextResponse(BaseModel):
     model: str
 
 
+class SaveGeneratedCsvRequest(BaseModel):
+    csv_text: str = Field(..., min_length=1)
+
+
+class SaveGeneratedCsvResponse(BaseModel):
+    saved_path: str
+    row_count: int
+    avatar_mapping_path: str
+    portraits_index_path: str | None = None
+
+
 class AvatarAgentSummary(BaseModel):
     agent_id: str
     full_name: str
     segment_key: str
+    live_video_enabled: bool = True
+    live_avatar_enabled: bool = True
     avatar_id: str
     avatar_name: str
     default_voice_id: str
@@ -144,18 +166,34 @@ class AvatarAgentsResponse(BaseModel):
 
 class AvatarSessionStartRequest(BaseModel):
     agent_id: str = Field(..., min_length=1)
+    context_override: str | None = None
 
 
 class AvatarSessionStartResponse(BaseModel):
     agent_id: str
+    mode: str
     avatar_id: str
     avatar_name: str
     default_voice_id: str
     default_voice_name: str
     livekit_url: str
     livekit_client_token: str
+    livekit_agent_token: str | None = None
     session_id: str
     system_prompt: str
+
+
+class AvatarTurnRequest(BaseModel):
+    agent_id: str = Field(..., min_length=1)
+    user_text: str = Field(..., min_length=1)
+
+
+class AvatarTurnResponse(BaseModel):
+    agent_id: str
+    assistant_text: str
+    voice_id: str
+    audio_mime_type: str
+    audio_base64: str
 
 
 app = FastAPI(
@@ -170,6 +208,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_portraits_refresh_lock = threading.Lock()
 
 
 def _load_planner_system_prompt() -> str:
@@ -227,13 +267,6 @@ def _normalize_record(record: dict[str, Any], fieldnames: list[str]) -> dict[str
         raw_value = record.get(field, "")
         normalized[field] = str(raw_value).strip() if raw_value is not None else ""
     return normalized
-
-
-def _is_repeated_header_row(row: dict[str, str], fieldnames: list[str]) -> bool:
-    for name in fieldnames:
-        if row.get(name, "").strip().lower() != name.strip().lower():
-            return False
-    return True
 
 
 def _parse_connections(raw_connections: str) -> list[str]:
@@ -397,9 +430,71 @@ def _agents_csv_path() -> Path:
     return Path(configured)
 
 
+def _save_generated_agents_csv_path() -> Path:
+    configured = os.getenv("GENERATED_AGENTS_CSV_PATH", str(DEFAULT_AGENTS_CSV_PATH)).strip()
+    return Path(configured)
+
+
+def _pick_avatars_script_path() -> Path:
+    default_script = Path(__file__).resolve().parent.parent / "avatars" / "pick_avatars_modal.py"
+    configured = os.getenv("PICK_AVATARS_SCRIPT", str(default_script)).strip()
+    return Path(configured)
+
+
 def _agent_mapping_path() -> Path:
     configured = os.getenv("AGENT_TO_AVATAR_JSON", str(DEFAULT_AGENT_TO_AVATAR_PATH)).strip()
     return Path(configured)
+
+
+def _portraits_script_path() -> Path:
+    default_script = Path(__file__).resolve().parent.parent / "backend-test" / "gen_portraits.py"
+    configured = os.getenv("GENERATE_PORTRAITS_SCRIPT", str(default_script)).strip()
+    return Path(configured)
+
+
+def _portraits_index_path() -> Path:
+    configured = os.getenv("PORTRAITS_INDEX_JSON", str(DEFAULT_PORTRAITS_INDEX_PATH)).strip()
+    return Path(configured)
+
+
+def _portraits_dir() -> Path:
+    configured = os.getenv("PORTRAITS_DIR", str(DEFAULT_PORTRAITS_DIR)).strip()
+    return Path(configured)
+
+
+def _resolve_portrait_path(agent_id: str) -> Path:
+    aid = str(agent_id or "").strip()
+    if not aid:
+        raise ValueError("agent_id is required.")
+
+    index_path = _portraits_index_path()
+    if index_path.exists():
+        try:
+            parsed = json.loads(index_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Portrait index JSON is invalid: {index_path}") from exc
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("agent_id", "")).strip() != aid:
+                    continue
+                raw_path = str(item.get("image_path", "")).strip()
+                if not raw_path:
+                    continue
+                candidate = Path(raw_path)
+                if not candidate.is_absolute():
+                    candidate = (index_path.parent / candidate).resolve()
+                if candidate.exists():
+                    return candidate
+
+    portraits_dir = _portraits_dir()
+    for ext in ("webp", "png", "jpg", "jpeg"):
+        candidate = portraits_dir / f"{aid}.{ext}"
+        if candidate.exists():
+            return candidate
+
+    raise ValueError(f"Portrait image not found for agent_id: {aid}")
 
 
 def _liveavatar_base_url() -> str:
@@ -412,6 +507,43 @@ def _liveavatar_api_key() -> str:
 
 def _liveavatar_context_id() -> str:
     return os.getenv("LIVEAVATAR_CONTEXT_ID", "").strip()
+
+
+def _liveavatar_mode() -> str:
+    raw = os.getenv("LIVEAVATAR_MODE", "FULL").strip().upper()
+    if raw == "LITE":
+        return "CUSTOM"
+    if raw in {"FULL", "CUSTOM"}:
+        return raw
+    return "FULL"
+
+
+def _liveavatar_is_sandbox() -> bool:
+    return os.getenv("LIVEAVATAR_SANDBOX", "0").strip().lower() in {"1", "true", "yes"}
+
+
+def _liveavatar_context_strategy() -> str:
+    # dynamic: create context per session; static: use LIVEAVATAR_CONTEXT_ID; auto: try dynamic then static fallback
+    raw = os.getenv("LIVEAVATAR_CONTEXT_STRATEGY", "dynamic").strip().lower()
+    if raw in {"dynamic", "static", "auto"}:
+        return raw
+    return "dynamic"
+
+
+def _liveavatar_opening_text_default() -> str:
+    return os.getenv("LIVEAVATAR_OPENING_TEXT", "Hi, how can I help today?").strip()
+
+
+def _elevenlabs_api_key() -> str:
+    return os.getenv("ELEVENLABS_API_KEY", "").strip()
+
+
+def _elevenlabs_model_id() -> str:
+    return os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2").strip()
+
+
+def _elevenlabs_output_format() -> str:
+    return os.getenv("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128").strip()
 
 
 def _load_agents_by_id() -> dict[str, dict[str, str]]:
@@ -460,7 +592,11 @@ def _liveavatar_request(
         raise ValueError("LIVEAVATAR_API_KEY is not configured.")
 
     url = urllib.parse.urljoin(f"{base_url}/", path.lstrip("/"))
-    headers = {"accept": "application/json"}
+    headers = {
+        "accept": "application/json",
+        # Some edge/WAF setups block default urllib user-agent strings.
+        "User-Agent": "matrix-backend/0.1 (+https://api.liveavatar.com)",
+    }
     body = None
     if payload is not None:
         headers["content-type"] = "application/json"
@@ -477,9 +613,9 @@ def _liveavatar_request(
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
-        raise ValueError(f"LiveAvatar API error {exc.code}: {detail[:260]}") from exc
+        raise ValueError(f"LiveAvatar API error {exc.code} for {url}: {detail[:320]}") from exc
     except urllib.error.URLError as exc:
-        raise ValueError(f"LiveAvatar API request failed: {exc.reason}") from exc
+        raise ValueError(f"LiveAvatar API request failed for {url}: {exc.reason}") from exc
 
     try:
         parsed = json.loads(raw)
@@ -491,6 +627,149 @@ def _liveavatar_request(
             f"LiveAvatar API returned code={parsed.get('code')}: {parsed.get('message', 'unknown error')}"
         )
     return parsed
+
+
+def _extract_context_id(parsed: dict[str, Any]) -> str:
+    data = parsed.get("data", {}) if isinstance(parsed, dict) else {}
+    for key in ("context_id", "id"):
+        value = str(data.get(key, "")).strip() if isinstance(data, dict) else ""
+        if value:
+            return value
+    return ""
+
+
+def _liveavatar_create_context(agent_id: str, system_prompt: str, opening_text: str) -> str:
+    prompt_text = (system_prompt or "").strip()
+    if not prompt_text:
+        raise ValueError(f"agent_id={agent_id} has empty system_prompt; cannot create dynamic context.")
+    opening = (opening_text or "").strip() or _liveavatar_opening_text_default()
+
+    name = f"agent-{agent_id}-{int(time.time())}"
+    candidate_payloads: list[dict[str, Any]] = [
+        # LiveAvatar contexts require `opening_text`; keep it present in every attempt.
+        {"name": name, "opening_text": opening, "system_prompt": prompt_text},
+        {"name": name, "opening_text": opening, "prompt": prompt_text},
+        {"name": name, "opening_text": opening, "content": prompt_text},
+        {"name": name, "opening_text": opening, "context": prompt_text},
+        {"name": name, "opening_text": opening},
+    ]
+
+    last_error: Exception | None = None
+    for payload in candidate_payloads:
+        try:
+            result = _liveavatar_request("POST", "/contexts", payload=payload)
+            context_id = _extract_context_id(result)
+            if context_id:
+                return context_id
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        raise ValueError(f"Failed to create LiveAvatar context dynamically: {last_error}") from last_error
+    raise ValueError("Failed to create LiveAvatar context dynamically: unknown response shape.")
+
+
+def _resolve_context_id_for_agent(agent_id: str, agent: dict[str, str]) -> str:
+    strategy = _liveavatar_context_strategy()
+    static_context_id = _liveavatar_context_id()
+
+    if strategy == "static":
+        if not static_context_id:
+            raise ValueError("LIVEAVATAR_CONTEXT_ID is required when LIVEAVATAR_CONTEXT_STRATEGY=static.")
+        return static_context_id
+
+    # dynamic / auto: create context from system prompt
+    try:
+        full_name = (agent.get("full_name") or "").strip()
+        if full_name:
+            opening_text = f"Hi, I'm {full_name}. How can I help today?"
+        else:
+            opening_text = _liveavatar_opening_text_default()
+        return _liveavatar_create_context(
+            agent_id=agent_id,
+            system_prompt=agent.get("system_prompt", ""),
+            opening_text=opening_text,
+        )
+    except Exception:
+        if strategy == "auto" and static_context_id:
+            return static_context_id
+        raise
+
+
+def _planner_chat(messages: list[dict[str, str]], *, temperature: float = 0.2, max_tokens: int = 500) -> str:
+    planner_endpoint = _planner_endpoint()
+    if not planner_endpoint:
+        raise ValueError("Planner endpoint is not configured.")
+
+    payload = {
+        "model": _planner_model_id(),
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    }
+
+    request = urllib.request.Request(
+        planner_endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_planner_headers(),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise ValueError(f"Planner endpoint responded {exc.code}: {detail[:260]}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"Planner endpoint request failed: {exc.reason}") from exc
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Planner response was not valid JSON.") from exc
+
+    content = parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Planner returned empty content.")
+    return content.strip()
+
+
+def _elevenlabs_tts(voice_id: str, text: str) -> bytes:
+    api_key = _elevenlabs_api_key()
+    if not api_key:
+        raise ValueError("ELEVENLABS_API_KEY is not configured.")
+    if not voice_id.strip():
+        raise ValueError("voice_id is required for ElevenLabs TTS.")
+
+    output_format = _elevenlabs_output_format()
+    endpoint = (
+        f"https://api.elevenlabs.io/v1/text-to-speech/{urllib.parse.quote(voice_id)}"
+        f"?output_format={urllib.parse.quote(output_format)}"
+    )
+    payload = {
+        "text": text,
+        "model_id": _elevenlabs_model_id(),
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "accept": "audio/mpeg",
+            "content-type": "application/json",
+            "xi-api-key": api_key,
+            "User-Agent": "matrix-backend/0.1 (+https://elevenlabs.io)",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise ValueError(f"ElevenLabs API error {exc.code}: {detail[:260]}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"ElevenLabs API request failed: {exc.reason}") from exc
 
 
 def _parse_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
@@ -511,8 +790,6 @@ def _parse_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
             normalized = _normalize_record(record, fieldnames)
             if not any(value for value in normalized.values()):
                 continue
-            if _is_repeated_header_row(normalized, fieldnames):
-                continue
 
             agent_id = normalized.get("agent_id", "")
             if not agent_id:
@@ -523,6 +800,91 @@ def _parse_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
         raise ValueError("CSV has no data rows.")
 
     return fieldnames, rows
+
+
+def _write_generated_agents_csv(csv_text: str) -> tuple[Path, int]:
+    normalized = str(csv_text or "").replace("\r\n", "\n").strip()
+    if not normalized:
+        raise ValueError("CSV content is empty.")
+
+    fieldnames, rows = _parse_csv_rows(normalized)
+    output_path = _save_generated_agents_csv_path()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({name: row.get(name, "") for name in fieldnames})
+
+    return output_path, len(rows)
+
+
+def _refresh_agent_avatar_mapping(agents_csv_path: Path) -> Path:
+    script_path = _pick_avatars_script_path()
+    if not script_path.exists():
+        raise ValueError(f"Avatar picker script not found: {script_path}")
+
+    output_mapping_path = _agent_mapping_path()
+    env = os.environ.copy()
+    env["AGENTS_CSV"] = str(agents_csv_path)
+    env["OUT_MAP_JSON"] = str(output_mapping_path)
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        preview = details[:500] if details else "No script output captured."
+        raise ValueError(f"Avatar mapping refresh failed: {preview}")
+
+    if not output_mapping_path.exists():
+        raise ValueError(f"Avatar mapping file was not produced: {output_mapping_path}")
+    return output_mapping_path
+
+
+def _refresh_agent_portraits(agents_csv_path: Path) -> Path:
+    script_path = _portraits_script_path()
+    if not script_path.exists():
+        raise ValueError(f"Portrait generator script not found: {script_path}")
+
+    output_index_path = _portraits_index_path()
+    output_dir = _portraits_dir()
+    env = os.environ.copy()
+    env["PORTRAITS_CSV_PATH"] = str(agents_csv_path)
+    env["PORTRAITS_OUT_DIR"] = str(output_dir)
+    env["PORTRAITS_LIMIT"] = ""
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        preview = details[:500] if details else "No script output captured."
+        raise ValueError(f"Portrait generation failed: {preview}")
+
+    if not output_index_path.exists():
+        raise ValueError(f"Portrait index file was not produced: {output_index_path}")
+    return output_index_path
+
+
+def _refresh_agent_portraits_background(agents_csv_path: Path) -> None:
+    with _portraits_refresh_lock:
+        try:
+            generated_path = _refresh_agent_portraits(agents_csv_path)
+            print(f"[INFO] Portrait generation finished: {generated_path}")
+        except Exception as exc:  # pragma: no cover - defensive background guard
+            print(f"[WARN] Portrait generation failed in background: {exc}")
 
 
 def build_social_graph(csv_text: str, directed: bool = False) -> GraphBuildResponse:
@@ -740,6 +1102,43 @@ async def planner_context_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/api/agents/generated-csv", response_model=SaveGeneratedCsvResponse)
+async def save_generated_agents_csv(payload: SaveGeneratedCsvRequest) -> SaveGeneratedCsvResponse:
+    portraits_index_path: Path | None = _portraits_index_path()
+    try:
+        output_path, row_count = _write_generated_agents_csv(payload.csv_text)
+        mapping_path = _refresh_agent_avatar_mapping(output_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write CSV file: {exc}") from exc
+
+    portraits_thread = threading.Thread(
+        target=_refresh_agent_portraits_background,
+        args=(output_path,),
+        daemon=True,
+    )
+    portraits_thread.start()
+
+    return SaveGeneratedCsvResponse(
+        saved_path=str(output_path),
+        row_count=row_count,
+        avatar_mapping_path=str(mapping_path),
+        portraits_index_path=str(portraits_index_path) if portraits_index_path else None,
+    )
+
+
+@app.get("/api/portrait/{agent_id}")
+async def portrait_image(agent_id: str):
+    try:
+        image_path = _resolve_portrait_path(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=image_path)
+
+
 @app.get("/api/avatar/agents", response_model=AvatarAgentsResponse)
 async def avatar_agents() -> AvatarAgentsResponse:
     try:
@@ -753,11 +1152,16 @@ async def avatar_agents() -> AvatarAgentsResponse:
         mapped = mapping.get(agent_id)
         if not isinstance(mapped, dict):
             continue
+        live_video_enabled = bool(
+            mapped.get("live_video_enabled", mapped.get("live_avatar_enabled", True))
+        )
         result.append(
             AvatarAgentSummary(
                 agent_id=agent_id,
                 full_name=agent.get("full_name", ""),
                 segment_key=agent.get("segment_key", ""),
+                live_video_enabled=live_video_enabled,
+                live_avatar_enabled=live_video_enabled,
                 avatar_id=str(mapped.get("avatar_id", "")).strip(),
                 avatar_name=str(mapped.get("avatar_name", "")).strip(),
                 default_voice_id=str(mapped.get("default_voice_id", "")).strip(),
@@ -773,9 +1177,91 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
     if not agent_id:
         raise HTTPException(status_code=400, detail="agent_id is required.")
 
-    context_id = _liveavatar_context_id()
-    if not context_id:
-        raise HTTPException(status_code=500, detail="LIVEAVATAR_CONTEXT_ID is not configured.")
+    mode = _liveavatar_mode()
+    context_id = ""
+
+    try:
+        agents_by_id = _load_agents_by_id()
+        mapping = _load_agent_avatar_mapping()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    agent = agents_by_id.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
+    effective_system_prompt = str(payload.context_override or "").strip() or agent.get("system_prompt", "")
+
+    mapped = mapping.get(agent_id)
+    if not isinstance(mapped, dict):
+        raise HTTPException(status_code=404, detail=f"No avatar mapping found for agent_id: {agent_id}")
+
+    avatar_id = str(mapped.get("avatar_id", "")).strip()
+    voice_id = str(mapped.get("default_voice_id", "")).strip()
+    if not avatar_id:
+        raise HTTPException(status_code=400, detail=f"Missing avatar_id for agent_id: {agent_id}")
+    if not voice_id:
+        raise HTTPException(status_code=400, detail=f"Missing default_voice_id for agent_id: {agent_id}")
+
+    try:
+        if mode == "FULL":
+            effective_agent = dict(agent)
+            effective_agent["system_prompt"] = effective_system_prompt
+            context_id = _resolve_context_id_for_agent(agent_id=agent_id, agent=effective_agent)
+            if not context_id:
+                raise ValueError(f"No context_id resolved for FULL mode (agent_id={agent_id}).")
+
+        token_payload: dict[str, Any] = {
+            "avatar_id": avatar_id,
+            "mode": mode,
+            "is_sandbox": _liveavatar_is_sandbox(),
+        }
+        if mode == "FULL":
+            token_payload["avatar_persona"] = {
+                "voice_id": voice_id,
+                "context_id": context_id,
+                "language": "en",
+            }
+        token_result = _liveavatar_request("POST", "/sessions/token", payload=token_payload)
+        session_token = (
+            token_result.get("data", {}).get("session_token", "") if isinstance(token_result, dict) else ""
+        )
+        if not session_token:
+            raise ValueError("LiveAvatar token response did not include session_token.")
+        start_result = _liveavatar_request("POST", "/sessions/start", session_token=session_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    start_data = start_result.get("data", {}) if isinstance(start_result, dict) else {}
+    livekit_url = str(start_data.get("livekit_url", "")).strip()
+    livekit_client_token = str(start_data.get("livekit_client_token", "")).strip()
+    livekit_agent_token = str(start_data.get("livekit_agent_token") or "").strip() or None
+    session_id = str(start_data.get("session_id", "")).strip()
+    if not livekit_url or not livekit_client_token or not session_id:
+        raise HTTPException(status_code=502, detail="LiveAvatar start response missing LiveKit credentials.")
+
+    return AvatarSessionStartResponse(
+        agent_id=agent_id,
+        mode=mode,
+        avatar_id=avatar_id,
+        avatar_name=str(mapped.get("avatar_name", "")).strip(),
+        default_voice_id=voice_id,
+        default_voice_name=str(mapped.get("default_voice_name", "")).strip(),
+        livekit_url=livekit_url,
+        livekit_client_token=livekit_client_token,
+        livekit_agent_token=livekit_agent_token,
+        session_id=session_id,
+        system_prompt=effective_system_prompt,
+    )
+
+
+@app.post("/api/avatar/turn", response_model=AvatarTurnResponse)
+async def avatar_turn(payload: AvatarTurnRequest) -> AvatarTurnResponse:
+    agent_id = payload.agent_id.strip()
+    user_text = payload.user_text.strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id is required.")
+    if not user_text:
+        raise HTTPException(status_code=400, detail="user_text is required.")
 
     try:
         agents_by_id = _load_agents_by_id()
@@ -790,51 +1276,36 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
     mapped = mapping.get(agent_id)
     if not isinstance(mapped, dict):
         raise HTTPException(status_code=404, detail=f"No avatar mapping found for agent_id: {agent_id}")
-
-    avatar_id = str(mapped.get("avatar_id", "")).strip()
     voice_id = str(mapped.get("default_voice_id", "")).strip()
-    if not avatar_id:
-        raise HTTPException(status_code=400, detail=f"Missing avatar_id for agent_id: {agent_id}")
     if not voice_id:
         raise HTTPException(status_code=400, detail=f"Missing default_voice_id for agent_id: {agent_id}")
 
     try:
-        token_payload = {
-            "avatar_id": avatar_id,
-            "mode": "FULL",
-            "avatar_persona": {
-                "voice_id": voice_id,
-                "context_id": context_id,
-                "language": "en",
-            },
-        }
-        token_result = _liveavatar_request("POST", "/sessions/token", payload=token_payload)
-        session_token = (
-            token_result.get("data", {}).get("session_token", "") if isinstance(token_result, dict) else ""
+        assistant_text = _planner_chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are roleplaying the specific fictional citizen profile below. "
+                        "Stay in character and respond conversationally in 2-4 sentences.\n\n"
+                        f"{agent.get('system_prompt', '')}"
+                    ),
+                },
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.3,
+            max_tokens=260,
         )
-        if not session_token:
-            raise ValueError("LiveAvatar token response did not include session_token.")
-        start_result = _liveavatar_request("POST", "/sessions/start", session_token=session_token)
+        audio_bytes = _elevenlabs_tts(voice_id=voice_id, text=assistant_text)
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    start_data = start_result.get("data", {}) if isinstance(start_result, dict) else {}
-    livekit_url = str(start_data.get("livekit_url", "")).strip()
-    livekit_client_token = str(start_data.get("livekit_client_token", "")).strip()
-    session_id = str(start_data.get("session_id", "")).strip()
-    if not livekit_url or not livekit_client_token or not session_id:
-        raise HTTPException(status_code=502, detail="LiveAvatar start response missing LiveKit credentials.")
-
-    return AvatarSessionStartResponse(
+    return AvatarTurnResponse(
         agent_id=agent_id,
-        avatar_id=avatar_id,
-        avatar_name=str(mapped.get("avatar_name", "")).strip(),
-        default_voice_id=voice_id,
-        default_voice_name=str(mapped.get("default_voice_name", "")).strip(),
-        livekit_url=livekit_url,
-        livekit_client_token=livekit_client_token,
-        session_id=session_id,
-        system_prompt=agent.get("system_prompt", ""),
+        assistant_text=assistant_text,
+        voice_id=voice_id,
+        audio_mime_type="audio/mpeg",
+        audio_base64=base64.b64encode(audio_bytes).decode("ascii"),
     )
 
 

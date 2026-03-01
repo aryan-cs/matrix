@@ -2323,6 +2323,34 @@ function App() {
     };
   }, []);
 
+  const prepareCsvForSimulation = async (csvPayload) => {
+    const normalizedCsv = String(csvPayload || "").trim();
+    if (!normalizedCsv) {
+      return { ok: false, error: "No generated CSV is available to save before simulation." };
+    }
+    try {
+      const response = await fetch("/api/agents/generated-csv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv_text: normalizedCsv })
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        return {
+          ok: false,
+          error: `CSV save/script pipeline failed (${response.status}): ${detail}`
+        };
+      }
+      await response.json();
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : "Unknown CSV preparation error"
+      };
+    }
+  };
+
   const handleRunSimulation = async (graphOverride = null) => {
     if (simulationStatus?.state === "running") {
       return { started: false, error: "Simulation is already running." };
@@ -3128,18 +3156,26 @@ function App() {
     if (editState) {
       if (!promptText) return;
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
-      const noChangesPattern = /^(no|no changes?|looks? good|proceed|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah)\b/i;
+      const noChangesPattern = /^(no|no changes?|looks? good|proceed|continue(?: as is)?|go ahead|start(?: simulation)?|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah|as is|whatever)\b/i;
       if (noChangesPattern.test(promptText.trim())) {
         const { csvPayload: currentCsv } = editState;
         const simulationGraph = buildNetworkGraphFromCsv(currentCsv) || graphPanelGraph;
-      setEditState(null);
-      setScenarioText("");
+        setEditState(null);
+        setScenarioText("");
         setIsSubmitting(true);
-        const simulationStart = await handleRunSimulation(simulationGraph);
-      scenarioTextRef.current = "";
-      setChatMessages((prev) => [
+        setChatMessages((prev) => [
           ...prev,
-          userTurn,
+          userTurn
+        ]);
+        if (shouldAutoScrollRef.current) {
+          window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
+        }
+        const csvPrepPromise = prepareCsvForSimulation(currentCsv);
+        const simulationStart = await handleRunSimulation(simulationGraph);
+        const csvPrep = await csvPrepPromise;
+        scenarioTextRef.current = "";
+        setChatMessages((prev) => [
+          ...prev,
           {
             id: createRuntimeId("assistant"),
             role: "assistant",
@@ -3149,6 +3185,18 @@ function App() {
             uiType: "status-tooltip"
           }
         ]);
+        if (!csvPrep.ok) {
+          setChatMessages((prev) => [
+            ...prev,
+            {
+              id: createRuntimeId("assistant"),
+              role: "assistant",
+              content: `Simulation is running, but CSV asset pipeline failed:\n${csvPrep.error}`,
+              uiType: "status-tooltip",
+              error: true
+            }
+          ]);
+        }
         setIsSubmitting(false);
         return;
       }
