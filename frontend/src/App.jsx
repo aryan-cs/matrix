@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import DotWaveBackground from "./components/DotWaveBackground";
 import GraphCirclePanel from "./components/GraphCirclePanel";
 import addIcon from "../assets/icons/add.svg";
+import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
 import downloadIcon from "../assets/icons/download.svg";
 import dropdownIcon from "../assets/icons/dropdown.svg";
@@ -3632,7 +3633,10 @@ function App() {
                   aria-label="Send input"
                   disabled={isSubmitting || isTranscribingSpeech || isSystemPrompting}
                 >
-                  <img src={waveformIcon} alt="" />
+                  <img
+                    src={isRecordingSpeech ? waveformIcon : scenarioText.trim() ? arrowUpIcon : waveformIcon}
+                    alt=""
+                  />
                 </button>
               </div>
             </div>
