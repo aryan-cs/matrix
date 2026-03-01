@@ -6,6 +6,8 @@ import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
 import downloadIcon from "../assets/icons/download.svg";
 import dropdownIcon from "../assets/icons/dropdown.svg";
+import micIcon from "../assets/icons/mic.svg";
+import waveformIcon from "../assets/icons/waveform.svg";
 import plannerSystemPromptRaw from "../../planner-system-prompt.txt?raw";
 
 const TITLE_TEXT = "Welcome to the Matrix.";
@@ -71,6 +73,10 @@ const DEFAULT_PLANNER_MODEL_ENDPOINT = "";
 const DEFAULT_PLANNER_MODEL_ID = "deepseek-r1";
 const DEFAULT_PLANNER_DEV_PROXY_PATH = "/api/planner/chat";
 const DEFAULT_EXA_PROXY_PATH = "/api/exa/search";
+const DEFAULT_SPEECH_LIVE_WS_PATH = "/api/speech/live";
+const DEFAULT_SPEECH_STREAM_TIMESLICE_MS = 280;
+const SPEECH_FINALIZE_GRACE_MS = 4500;
+const DEFAULT_BROWSER_SPEECH_LANG = "en-US";
 const DEFAULT_CONTEXT_MAX_TOTAL_CHARS = 26000;
 const DEFAULT_CONTEXT_MAX_FILE_CHARS = 5000;
 
@@ -93,6 +99,16 @@ const PLANNER_DEV_PROXY_PATH = (
 const USE_PLANNER_DEV_PROXY =
   import.meta.env.DEV && import.meta.env.VITE_USE_PLANNER_PROXY !== "false";
 const EXA_PROXY_PATH = (import.meta.env.VITE_EXA_PROXY_PATH || DEFAULT_EXA_PROXY_PATH).trim();
+const SPEECH_LIVE_WS_PATH = (
+  import.meta.env.VITE_SPEECH_LIVE_WS_PATH || DEFAULT_SPEECH_LIVE_WS_PATH
+).trim();
+const SPEECH_STREAM_TIMESLICE_MS = parsePositiveInt(
+  import.meta.env.VITE_SPEECH_STREAM_TIMESLICE_MS,
+  DEFAULT_SPEECH_STREAM_TIMESLICE_MS
+);
+const BROWSER_SPEECH_LANG =
+  (import.meta.env.VITE_BROWSER_SPEECH_LANG || DEFAULT_BROWSER_SPEECH_LANG).trim() ||
+  DEFAULT_BROWSER_SPEECH_LANG;
 const PLANNER_CONTEXT_MAX_TOTAL_CHARS = parsePositiveInt(
   import.meta.env.VITE_PLANNER_CONTEXT_MAX_TOTAL_CHARS,
   DEFAULT_CONTEXT_MAX_TOTAL_CHARS
@@ -1713,6 +1729,9 @@ function App() {
   const [isArtifactModalClosing, setIsArtifactModalClosing] = useState(false);
   const [queuedArtifactDownloadIds, setQueuedArtifactDownloadIds] = useState(() => new Set());
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRecordingSpeech, setIsRecordingSpeech] = useState(false);
+  const [isTranscribingSpeech, setIsTranscribingSpeech] = useState(false);
+  const [isSpeechDrivenInput, setIsSpeechDrivenInput] = useState(false);
   const [isChatMode, setIsChatMode] = useState(false);
   const [isHeroCompacted, setIsHeroCompacted] = useState(false);
   const [isGraphPanelOpen, setIsGraphPanelOpen] = useState(false);
@@ -1730,6 +1749,14 @@ function App() {
   const [clarifyState, setClarifyState] = useState(null);
   const [editState, setEditState] = useState(null);
   const fileInputRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const speechChunksRef = useRef([]);
+  const speechSocketRef = useRef(null);
+  const speechRecognitionRef = useRef(null);
+  const speechPrefixTextRef = useRef("");
+  const speechFinalizeTimerRef = useRef(0);
+  const scenarioTextRef = useRef(scenarioText);
   const chatScrollRef = useRef(null);
   const composerShellRef = useRef(null);
   const heroCopyRef = useRef(null);
@@ -1750,6 +1777,16 @@ function App() {
   useEffect(() => {
     contextFilesRef.current = contextFiles;
   }, [contextFiles]);
+
+  useEffect(() => {
+    scenarioTextRef.current = scenarioText;
+  }, [scenarioText]);
+
+  useEffect(() => {
+    if (!scenarioText.trim()) {
+      setIsSpeechDrivenInput(false);
+    }
+  }, [scenarioText]);
 
   const isChatActive = isChatMode;
   const clampGraphPanelWidth = (candidateWidth) => {
@@ -1923,8 +1960,308 @@ function App() {
         window.clearTimeout(artifactModalCloseTimerRef.current);
         artifactModalCloseTimerRef.current = 0;
       }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop();
+      }
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+      }
+      if (speechSocketRef.current) {
+        speechSocketRef.current.close();
+        speechSocketRef.current = null;
+      }
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.stop();
+        } catch {
+          // no-op
+        }
+        speechRecognitionRef.current = null;
+      }
+      if (speechFinalizeTimerRef.current) {
+        window.clearTimeout(speechFinalizeTimerRef.current);
+        speechFinalizeTimerRef.current = 0;
+      }
     };
   }, []);
+
+  const appendSpeechErrorMessage = (errorText) => {
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: createRuntimeId("assistant"),
+        role: "assistant",
+        content: `Speech-to-text failed: ${errorText}`,
+        uiType: "status-tooltip",
+        error: true
+      }
+    ]);
+  };
+
+  const resolveSpeechLiveWebSocketUrl = () => {
+    const configured = String(SPEECH_LIVE_WS_PATH || "").trim();
+    if (/^wss?:\/\//i.test(configured)) return configured;
+    const base = window.location.origin.replace(/^http/i, "ws");
+    const path = configured.startsWith("/") ? configured : `/${configured}`;
+    return `${base}${path}`;
+  };
+
+  const openSpeechLiveSocket = () =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(resolveSpeechLiveWebSocketUrl());
+      ws.binaryType = "arraybuffer";
+
+      const timeoutId = window.setTimeout(() => {
+        ws.close();
+        reject(new Error("Timed out connecting to live speech endpoint."));
+      }, 5000);
+
+      ws.onopen = () => {
+        window.clearTimeout(timeoutId);
+        resolve(ws);
+      };
+      ws.onerror = () => {
+        window.clearTimeout(timeoutId);
+        reject(new Error("Failed to connect to live speech endpoint."));
+      };
+    });
+
+  const preferredRecorderMimeType = () => {
+    if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+      return "";
+    }
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/ogg;codecs=opus",
+      "audio/ogg"
+    ];
+    for (const candidate of candidates) {
+      if (MediaRecorder.isTypeSupported(candidate)) {
+        return candidate;
+      }
+    }
+    return "";
+  };
+
+  const startBrowserInterimRecognition = () => {
+    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) return;
+
+    try {
+      const recognition = new SpeechRecognitionCtor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = BROWSER_SPEECH_LANG;
+
+      let finalText = "";
+      recognition.onresult = (event) => {
+        let interimText = "";
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          const result = event.results[i];
+          const transcript = String(result?.[0]?.transcript || "").trim();
+          if (!transcript) continue;
+          if (result.isFinal) {
+            finalText = [finalText, transcript].filter(Boolean).join(" ").trim();
+          } else {
+            interimText = [interimText, transcript].filter(Boolean).join(" ").trim();
+          }
+        }
+        const spoken = [finalText, interimText].filter(Boolean).join(" ").trim();
+        if (!spoken) return;
+        const prefix = speechPrefixTextRef.current;
+        const combined = [prefix, spoken].filter(Boolean).join(" ").trim();
+        setIsSpeechDrivenInput(true);
+        scenarioTextRef.current = combined;
+        setScenarioText(combined);
+      };
+      recognition.onerror = () => {
+        // Fallback silently to whisper live stream only.
+      };
+      recognition.onend = () => {
+        speechRecognitionRef.current = null;
+      };
+
+      recognition.start();
+      speechRecognitionRef.current = recognition;
+    } catch {
+      // Fallback silently to whisper live stream only.
+    }
+  };
+
+  const closeSpeechResources = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+    if (speechSocketRef.current) {
+      try {
+        speechSocketRef.current.close();
+      } catch {
+        // no-op
+      }
+      speechSocketRef.current = null;
+    }
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {
+        // no-op
+      }
+      speechRecognitionRef.current = null;
+    }
+    if (speechFinalizeTimerRef.current) {
+      window.clearTimeout(speechFinalizeTimerRef.current);
+      speechFinalizeTimerRef.current = 0;
+    }
+    mediaRecorderRef.current = null;
+    speechChunksRef.current = [];
+  };
+
+  const stopSpeechCapture = () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    recorder.stop();
+    setIsRecordingSpeech(false);
+  };
+
+  const startSpeechCapture = async () => {
+    if (!navigator?.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      appendSpeechErrorMessage("Your browser does not support microphone recording.");
+      return;
+    }
+
+    if (isSubmitting || isTranscribingSpeech) return;
+
+    setIsTranscribingSpeech(true);
+
+    let ws;
+    try {
+      ws = await openSpeechLiveSocket();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to connect to live speech endpoint.";
+      appendSpeechErrorMessage(message);
+      setIsTranscribingSpeech(false);
+      return;
+    }
+    speechSocketRef.current = ws;
+    speechPrefixTextRef.current = scenarioTextRef.current.trim();
+    startBrowserInterimRecognition();
+
+    ws.onmessage = (event) => {
+      try {
+        const parsed = JSON.parse(String(event.data || "{}"));
+        if (parsed?.type === "error") {
+          appendSpeechErrorMessage(String(parsed.error || "Live speech endpoint error."));
+          closeSpeechResources();
+          setIsRecordingSpeech(false);
+          setIsTranscribingSpeech(false);
+          return;
+        }
+        const liveText = String(parsed?.text || "").trim();
+        const prefix = speechPrefixTextRef.current;
+        const combined = [prefix, liveText].filter(Boolean).join(" ").trim();
+        if (liveText) {
+          setIsSpeechDrivenInput(true);
+        }
+        if (parsed?.type === "final" || combined.length >= scenarioTextRef.current.length) {
+          scenarioTextRef.current = combined;
+          setScenarioText(combined);
+        }
+
+        if (parsed?.type === "final") {
+          closeSpeechResources();
+          setIsRecordingSpeech(false);
+          setIsTranscribingSpeech(false);
+        }
+      } catch {
+        // Ignore malformed messages.
+      }
+    };
+
+    ws.onerror = () => {
+      appendSpeechErrorMessage("Live speech socket error.");
+      closeSpeechResources();
+      setIsRecordingSpeech(false);
+      setIsTranscribingSpeech(false);
+    };
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Microphone permission was denied.";
+      appendSpeechErrorMessage(message);
+      closeSpeechResources();
+      setIsTranscribingSpeech(false);
+      return;
+    }
+
+    mediaStreamRef.current = stream;
+    speechChunksRef.current = [];
+    const mimeType = preferredRecorderMimeType();
+    const recorder = mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream);
+    mediaRecorderRef.current = recorder;
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: "config",
+          mime_type: recorder.mimeType || mimeType || "audio/webm"
+        })
+      );
+    }
+
+    recorder.addEventListener("dataavailable", async (event) => {
+      if (!event.data || event.data.size === 0) return;
+      speechChunksRef.current.push(event.data);
+      const socket = speechSocketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      try {
+        const mimeType = recorder.mimeType || "audio/webm";
+        const snapshotBlob = new Blob(speechChunksRef.current, { type: mimeType });
+        const bytes = await snapshotBlob.arrayBuffer();
+        socket.send(bytes);
+      } catch {
+        appendSpeechErrorMessage("Failed to stream audio chunk.");
+      }
+    });
+
+    recorder.addEventListener("stop", async () => {
+      setIsTranscribingSpeech(true);
+      try {
+        const socket = speechSocketRef.current;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send("finalize");
+        }
+      } catch {
+        // no-op
+      } finally {
+        speechFinalizeTimerRef.current = window.setTimeout(() => {
+          closeSpeechResources();
+          setIsTranscribingSpeech(false);
+        }, SPEECH_FINALIZE_GRACE_MS);
+      }
+    });
+
+    recorder.start(SPEECH_STREAM_TIMESLICE_MS);
+    setIsRecordingSpeech(true);
+    setIsTranscribingSpeech(false);
+  };
+
+  const handleSpeechButtonClick = () => {
+    if (isRecordingSpeech) {
+      stopSpeechCapture();
+      return;
+    }
+    void startSpeechCapture();
+  };
+
+  const hasTypedInput = scenarioText.trim().length > 0 && !isSpeechDrivenInput;
 
   useEffect(() => {
     const handleResize = () => {
@@ -2669,7 +3006,10 @@ function App() {
 
   const handleComposerSubmit = async (event) => {
     event.preventDefault();
-    const promptText = scenarioText.trim();
+    if (isRecordingSpeech) {
+      stopSpeechCapture();
+    }
+    const promptText = scenarioTextRef.current.trim();
 
     // If we're waiting for edit feedback after CSV generation
     if (editState) {
@@ -2677,9 +3017,10 @@ function App() {
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
       const noChangesPattern = /^(no|no changes?|looks? good|proceed|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah)\b/i;
       if (noChangesPattern.test(promptText.trim())) {
-        setEditState(null);
-        setScenarioText("");
-        setChatMessages((prev) => [
+      setEditState(null);
+      setScenarioText("");
+      scenarioTextRef.current = "";
+      setChatMessages((prev) => [
           ...prev,
           userTurn,
           { id: createRuntimeId("assistant"), role: "assistant", content: "Simulation started! Your agents are now active in the Matrix." }
@@ -2702,6 +3043,7 @@ function App() {
         const requestedSampleCount = inferEditTargetSampleCount(currentCsv, promptText);
         setEditState(null);
         setScenarioText("");
+        scenarioTextRef.current = "";
         setIsSubmitting(true);
         setChatMessages((prev) => [
           ...prev,
@@ -2754,6 +3096,7 @@ function App() {
 
       setClarifyState(null);
       setScenarioText("");
+      scenarioTextRef.current = "";
       setIsSubmitting(true);
       setChatMessages((prev) => [
         ...prev,
@@ -2828,6 +3171,7 @@ function App() {
         }
       ]);
       setScenarioText("");
+      scenarioTextRef.current = "";
       window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
 
       const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
@@ -3148,12 +3492,49 @@ function App() {
                 <input
                   type="text"
                   value={scenarioText}
-                  onChange={(event) => setScenarioText(event.target.value)}
+                  onChange={(event) => {
+                    const nextValue = event.target.value;
+                    setIsSpeechDrivenInput(false);
+                    scenarioTextRef.current = nextValue;
+                    setScenarioText(nextValue);
+                  }}
                   placeholder={placeholderText}
                   aria-label="Simulation scenario"
                 />
-                <button className="send-btn" type="submit" aria-label="Submit simulation" disabled={isSubmitting}>
-                  <img src={arrowUpIcon} alt="" />
+                <button
+                  className={`composer-mic-btn ${isRecordingSpeech ? "recording" : ""}`}
+                  type="button"
+                  aria-label={
+                    isRecordingSpeech
+                      ? "Stop voice capture and transcribe"
+                      : "Start voice capture with speech-to-text"
+                  }
+                  title={
+                    isRecordingSpeech
+                      ? "Stop recording"
+                      : isTranscribingSpeech
+                        ? "Transcribing..."
+                        : "Voice input"
+                  }
+                  disabled={isSubmitting || isTranscribingSpeech}
+                  onClick={handleSpeechButtonClick}
+                >
+                  <img src={micIcon} alt="" />
+                </button>
+                <button
+                  className={`send-btn composer-primary-action ${isRecordingSpeech ? "recording" : ""}`}
+                  type={hasTypedInput ? "submit" : "button"}
+                  aria-label={
+                    hasTypedInput
+                      ? "Submit simulation"
+                      : isRecordingSpeech
+                        ? "Stop voice capture and transcribe"
+                        : "Start voice capture with speech-to-text"
+                  }
+                  disabled={isSubmitting || isTranscribingSpeech}
+                  onClick={hasTypedInput ? undefined : handleSpeechButtonClick}
+                >
+                  <img src={hasTypedInput ? arrowUpIcon : waveformIcon} alt="" />
                 </button>
               </div>
             </div>
