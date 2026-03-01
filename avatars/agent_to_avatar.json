@@ -11,14 +11,14 @@
     "agent_ethnicity": "other"
   },
   "TX-002": {
-    "avatar_id": "fc4125a5-83fa-45e2-8574-bf657ac19998",
-    "avatar_name": "Graham in Black Suit (Portrait)",
-    "default_voice_id": "e04e9d57-853f-4d72-a8ff-8e3c768f4c9c",
-    "default_voice_name": "Graham - IA",
+    "avatar_id": "0930fd59-c8ad-434d-ad53-b391a1768720",
+    "avatar_name": "Dexter Lawyer",
+    "default_voice_id": "b952f553-f7f3-4e52-8625-86b4c415384f",
+    "default_voice_name": "Dexter - Professional",
     "confidence": 0.85,
     "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
     "agent_gender": "male",
-    "agent_age_bucket": "45-54",
+    "agent_age_bucket": "55-64",
     "agent_ethnicity": "white"
   },
   "TX-003": {
@@ -37,21 +37,21 @@
     "avatar_name": "Dexter Lawyer",
     "default_voice_id": "b952f553-f7f3-4e52-8625-86b4c415384f",
     "default_voice_name": "Dexter - Professional",
-    "confidence": 0.85,
-    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
-    "agent_gender": "male",
-    "agent_age_bucket": "65+",
-    "agent_ethnicity": "white"
-  },
-  "TX-005": {
-    "avatar_id": "5c6e2257-bb91-48f4-a75d-d4c9ad212af9",
-    "avatar_name": "Rika in Blue Suit (Portrait)",
-    "default_voice_id": "b2bd6569-a537-4342-aeca-a1f15d2a2c97",
-    "default_voice_name": "Rika - IA",
     "confidence": 0.45,
     "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
-    "agent_gender": "female",
-    "agent_age_bucket": "45-54",
+    "agent_gender": "male",
+    "agent_age_bucket": "55-64",
     "agent_ethnicity": "other"
+  },
+  "TX-005": {
+    "avatar_id": "65f9e3c9-d48b-4118-b73a-4ae2e3cbb8f0",
+    "avatar_name": "June HR",
+    "default_voice_id": "62bbb4b2-bb26-4727-bc87-cfb2bd4e0cc8",
+    "default_voice_name": "June - Lifelike",
+    "confidence": 0.85,
+    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
+    "agent_gender": "female",
+    "agent_age_bucket": "18-24",
+    "agent_ethnicity": "asian"
   }
 }

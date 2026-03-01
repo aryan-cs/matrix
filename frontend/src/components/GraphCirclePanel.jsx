@@ -345,6 +345,7 @@ function GraphCirclePanel({ graph = null }) {
   const [mappedAgentsById, setMappedAgentsById] = useState({});
   const [avatarStatus, setAvatarStatus] = useState("Select a node to preview avatar.");
   const [avatarError, setAvatarError] = useState("");
+  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
   const selectedNodeIdRef = useRef("");
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
@@ -430,10 +431,31 @@ function GraphCirclePanel({ graph = null }) {
     element.volume = 1;
     if (typeof element.play === "function") {
       element.play().catch(() => {
-        // Autoplay can be blocked by browser policy; keep element attached regardless.
+        // Browser autoplay policy can block hidden audio until a user gesture.
+        setNeedsAudioUnlock(true);
       });
     }
     node.appendChild(element);
+  };
+
+  const unlockAudioPlayback = async () => {
+    const sink = audioSinkRef.current;
+    if (!sink) return;
+    const mediaEls = Array.from(sink.querySelectorAll("audio,video"));
+    let playedAny = false;
+    for (const el of mediaEls) {
+      if (typeof el.play !== "function") continue;
+      try {
+        await el.play();
+        playedAny = true;
+      } catch {
+        // Keep trying remaining elements.
+      }
+    }
+    if (playedAny) {
+      setNeedsAudioUnlock(false);
+      setAvatarStatus(`Avatar ready for ${selectedNodeId}.`);
+    }
   };
 
   useEffect(() => {
@@ -482,6 +504,7 @@ function GraphCirclePanel({ graph = null }) {
       if (!selectedNodeId) {
         disconnectAvatar();
         setAvatarError("");
+        setNeedsAudioUnlock(false);
         setAvatarStatus("Select a node to preview avatar.");
         return;
       }
@@ -489,12 +512,14 @@ function GraphCirclePanel({ graph = null }) {
       if (!selectedMappedAgent) {
         disconnectAvatar();
         setAvatarError("");
+        setNeedsAudioUnlock(false);
         setAvatarStatus(`No avatar mapping found for ${selectedNodeId}.`);
         return;
       }
 
       disconnectAvatar();
       setAvatarError("");
+      setNeedsAudioUnlock(false);
       setAvatarStatus(`Starting avatar for ${selectedNodeId}...`);
 
       try {
@@ -1029,6 +1054,11 @@ function GraphCirclePanel({ graph = null }) {
             </div>
             <div ref={audioSinkRef} />
             <p className="graph-node-avatar-status">{avatarStatus}</p>
+            {needsAudioUnlock ? (
+              <button type="button" className="graph-node-audio-unlock" onClick={unlockAudioPlayback}>
+                Enable Voice
+              </button>
+            ) : null}
             {avatarError ? <p className="graph-node-avatar-error">{avatarError}</p> : null}
             {selectedMappedAgent ? (
               <p className="graph-node-avatar-meta">

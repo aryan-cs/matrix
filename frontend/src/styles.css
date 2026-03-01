@@ -261,6 +261,22 @@ input {
   line-height: 1.35;
 }
 
+.graph-node-audio-unlock {
+  justify-self: start;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 6px 9px;
+  cursor: pointer;
+}
+
+.graph-node-audio-unlock:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
 .graph-node-avatar-error {
   margin: 0;
   color: #ff9a9a;
