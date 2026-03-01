@@ -357,6 +357,9 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
   const summaryRequestSeqRef = useRef(0);
   const roomRef = useRef(null);
   const audioSinkRef = useRef(null);
+  const videoSinkRef = useRef(null);
+  const allowAudioTracksRef = useRef(false);
+  const allowVideoTracksRef = useRef(false);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -386,6 +389,9 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
     if (!selectedNodeId) return null;
     return mappedAgentsById[selectedNodeId] || null;
   }, [selectedNodeId, mappedAgentsById]);
+  const selectedLiveVideoEnabled = selectedMappedAgent
+    ? selectedMappedAgent.live_video_enabled !== false
+    : false;
   const selectedPortraitUrl = useMemo(() => {
     if (!avatarsEnabled || !selectedNodeId) return "";
     return `${PORTRAIT_ENDPOINT}/${encodeURIComponent(selectedNodeId)}`;
@@ -412,38 +418,63 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
     }
   };
 
+  const clearVideoSink = () => {
+    const node = videoSinkRef.current;
+    if (!node) return;
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  };
+
   const disconnectAvatar = () => {
     if (roomRef.current) {
       roomRef.current.disconnect();
       roomRef.current = null;
     }
     clearAudioSink();
+    clearVideoSink();
+    allowAudioTracksRef.current = false;
+    allowVideoTracksRef.current = false;
   };
 
   const attachTrack = (track) => {
-    if (track.kind !== Track.Kind.Audio) {
+    if (track.kind === Track.Kind.Audio) {
+      if (!allowAudioTracksRef.current) return;
+      const node = audioSinkRef.current;
+      if (!node) return;
+      const element = track.attach();
+      element.classList.add("graph-node-avatar-track");
+      element.classList.add("graph-node-avatar-audio-hidden");
+      element.dataset.kind = "audio";
+      element.autoplay = true;
+      element.playsInline = true;
+      element.controls = false;
+      element.preload = "auto";
+      element.muted = false;
+      element.volume = 1;
+      if (typeof element.play === "function") {
+        element.play().catch(() => {
+          // Browser autoplay policy can block hidden audio until a user gesture.
+          setNeedsAudioUnlock(true);
+        });
+      }
+      node.appendChild(element);
       return;
     }
 
-    const node = audioSinkRef.current;
-    if (!node) return;
-    const element = track.attach();
-    element.classList.add("graph-node-avatar-track");
-    element.classList.add("graph-node-avatar-audio-hidden");
-    element.dataset.kind = "audio";
-    element.autoplay = true;
-    element.playsInline = true;
-    element.controls = false;
-    element.preload = "auto";
-    element.muted = false;
-    element.volume = 1;
-    if (typeof element.play === "function") {
-      element.play().catch(() => {
-        // Browser autoplay policy can block hidden audio until a user gesture.
-        setNeedsAudioUnlock(true);
-      });
+    if (track.kind === Track.Kind.Video) {
+      if (!allowVideoTracksRef.current) return;
+      const node = videoSinkRef.current;
+      if (!node) return;
+      const element = track.attach();
+      element.classList.add("graph-node-avatar-track");
+      element.dataset.kind = "video";
+      element.autoplay = true;
+      element.playsInline = true;
+      element.controls = false;
+      element.preload = "auto";
+      node.appendChild(element);
     }
-    node.appendChild(element);
   };
 
   const unlockAudioPlayback = async () => {
@@ -549,7 +580,9 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
         return;
       }
 
-      if (!activeCall || activeCall.nodeId !== selectedNodeId) {
+      const audioRequested = Boolean(activeCall && activeCall.nodeId === selectedNodeId);
+      const shouldStartSession = selectedLiveVideoEnabled || audioRequested;
+      if (!shouldStartSession) {
         disconnectAvatar();
         setAvatarError("");
         setNeedsAudioUnlock(false);
@@ -560,7 +593,13 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
       disconnectAvatar();
       setAvatarError("");
       setNeedsAudioUnlock(false);
-      setAvatarStatus(`${selectedDisplayName} is connecting...`);
+      allowVideoTracksRef.current = selectedLiveVideoEnabled;
+      allowAudioTracksRef.current = audioRequested;
+      setAvatarStatus(
+        selectedLiveVideoEnabled && !audioRequested
+          ? `${selectedDisplayName} video is connecting...`
+          : `${selectedDisplayName} is connecting...`
+      );
 
       try {
         const response = await fetch(START_ENDPOINT, {
@@ -586,7 +625,11 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
         });
         room.on(RoomEvent.ConnectionStateChanged, (state) => {
           if (!cancelled) {
-            setAvatarStatus(`${selectedDisplayName} is ${state}.`);
+            if (state === "connected" && selectedLiveVideoEnabled && !audioRequested) {
+              setAvatarStatus(`${selectedDisplayName} video is live. Click Call to start audio.`);
+            } else {
+              setAvatarStatus(`${selectedDisplayName} is ${state}.`);
+            }
           }
         });
         room.on(RoomEvent.Disconnected, () => {
@@ -601,16 +644,12 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
           return;
         }
 
-        // Match the proven tester behavior: publish local media so avatar agent can respond.
-        try {
-          await room.localParticipant.setMicrophoneEnabled(true);
-        } catch {
-          // Permission denied or unavailable; keep session alive for remote avatar playback.
-        }
-        try {
-          await room.localParticipant.setCameraEnabled(true);
-        } catch {
-          // Optional for this preview mode.
+        if (audioRequested) {
+          try {
+            await room.localParticipant.setMicrophoneEnabled(true);
+          } catch {
+            // Permission denied or unavailable; keep session alive for playback.
+          }
         }
 
         room.remoteParticipants.forEach((participant) => {
@@ -622,7 +661,11 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
         });
 
         roomRef.current = room;
-        setAvatarStatus(`${selectedDisplayName} is connected.`);
+        setAvatarStatus(
+          selectedLiveVideoEnabled && !audioRequested
+            ? `${selectedDisplayName} video is live. Click Call to start audio.`
+            : `${selectedDisplayName} is connected.`
+        );
       } catch (error) {
         if (cancelled) return;
         disconnectAvatar();
@@ -637,7 +680,7 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
       cancelled = true;
       disconnectAvatar();
     };
-  }, [avatarsEnabled, selectedNodeId, selectedMappedAgent, activeCall, selectedDisplayName]);
+  }, [avatarsEnabled, selectedNodeId, selectedMappedAgent, selectedLiveVideoEnabled, activeCall, selectedDisplayName]);
 
   useEffect(() => {
     return () => disconnectAvatar();
@@ -1066,7 +1109,9 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
 
   const resolvedCount = graphData.nodes.length;
   const isTerminalOpen = Boolean(selectedNodeId);
-  const canStartCall = Boolean(avatarsEnabled && selectedNodeId && selectedMappedAgent && !hasActiveCall);
+  const canStartCall = Boolean(
+    avatarsEnabled && selectedNodeId && selectedMappedAgent && !hasActiveCall
+  );
 
   const handleStartCall = () => {
     if (!selectedNodeId || !selectedMappedAgent) return;
@@ -1086,23 +1131,6 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
         ) : null}
         <canvas ref={canvasRef} className="graph-circle-canvas-element" />
       </div>
-      {avatarsEnabled ? (
-        <div className="graph-panel-fab-stack" aria-label="Graph actions">
-          <button
-            type="button"
-            className="graph-panel-fab"
-            aria-label="Call"
-            onClick={handleStartCall}
-            disabled={!canStartCall}
-            title={canStartCall ? "Start call" : "Select a mapped node to call"}
-          >
-            <img src={callIcon} alt="" />
-          </button>
-          <button type="button" className="graph-panel-fab" aria-label="Notes">
-            <img src={notesIcon} alt="" />
-          </button>
-        </div>
-      ) : null}
       <div
         className={`graph-node-terminal ${isTerminalOpen ? "open" : ""}`}
         aria-hidden={!isTerminalOpen}
@@ -1110,16 +1138,39 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
         <div className="graph-node-terminal-scroll" ref={terminalScrollRef}>
           {avatarsEnabled ? (
             <div className="graph-node-avatar">
-              <div className="graph-node-avatar-media">
-                {selectedPortraitUrl ? (
-                  <img
-                    key={selectedPortraitUrl}
-                    src={selectedPortraitUrl}
-                    alt={`Portrait of ${selectedNodeId}`}
-                    className="graph-node-portrait-image"
-                    loading="lazy"
-                  />
-                ) : null}
+              <div className="graph-node-avatar-top">
+                <div className="graph-node-avatar-media">
+                  {selectedLiveVideoEnabled ? (
+                    <div ref={videoSinkRef} className="graph-node-avatar-video-sink" />
+                  ) : selectedPortraitUrl ? (
+                    <img
+                      key={selectedPortraitUrl}
+                      src={selectedPortraitUrl}
+                      alt={`Portrait of ${selectedNodeId}`}
+                      className="graph-node-portrait-image"
+                      loading="lazy"
+                    />
+                  ) : null}
+                </div>
+                <div className="graph-node-avatar-actions" aria-label="Graph actions">
+                  <button
+                    type="button"
+                    className="graph-panel-fab"
+                    aria-label="Call"
+                    onClick={handleStartCall}
+                    disabled={!canStartCall}
+                    title={
+                      canStartCall
+                        ? "Start call"
+                        : "Select a mapped node to call"
+                    }
+                  >
+                    <img src={callIcon} alt="" />
+                  </button>
+                  <button type="button" className="graph-panel-fab" aria-label="Notes">
+                    <img src={notesIcon} alt="" />
+                  </button>
+                </div>
               </div>
               <div ref={audioSinkRef} />
               <p className="graph-node-avatar-status">{avatarStatus}</p>

@@ -108,6 +108,8 @@ class AvatarAgentSummary(BaseModel):
     agent_id: str
     full_name: str
     segment_key: str
+    live_video_enabled: bool = True
+    live_avatar_enabled: bool = True
     avatar_id: str
     avatar_name: str
     default_voice_id: str
@@ -1092,11 +1094,16 @@ async def avatar_agents() -> AvatarAgentsResponse:
         mapped = mapping.get(agent_id)
         if not isinstance(mapped, dict):
             continue
+        live_video_enabled = bool(
+            mapped.get("live_video_enabled", mapped.get("live_avatar_enabled", True))
+        )
         result.append(
             AvatarAgentSummary(
                 agent_id=agent_id,
                 full_name=agent.get("full_name", ""),
                 segment_key=agent.get("segment_key", ""),
+                live_video_enabled=live_video_enabled,
+                live_avatar_enabled=live_video_enabled,
                 avatar_id=str(mapped.get("avatar_id", "")).strip(),
                 avatar_name=str(mapped.get("avatar_name", "")).strip(),
                 default_voice_id=str(mapped.get("default_voice_id", "")).strip(),
