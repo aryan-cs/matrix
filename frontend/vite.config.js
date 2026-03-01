@@ -1,12 +1,35 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+import { fileURLToPath } from "url";
 
 const DEFAULT_PLANNER_MODEL_ENDPOINT = "";
 const DEFAULT_PLANNER_MODEL_ID = "deepseek-r1";
 const DEFAULT_PLANNER_PROXY_PATH = "/api/planner/chat";
 const DEFAULT_EXA_PROXY_PATH = "/api/exa/search";
 const DEFAULT_EXA_API_ENDPOINT = "";
+const DEFAULT_SPEECH_PROXY_PATH = "/api/speech/transcribe";
+const DEFAULT_SPEECH_API_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
+const configFilePath = fileURLToPath(import.meta.url);
+const frontendRootDir = path.dirname(configFilePath);
+const repoRootDir = path.resolve(frontendRootDir, "..");
+
+function mergedEnvForMode(mode) {
+  // Load repo-root env first, then frontend-local env overrides.
+  return {
+    ...loadEnv(mode, repoRootDir, ""),
+    ...loadEnv(mode, frontendRootDir, ""),
+  };
+}
+
+function viteClientDefineFromEnv(env) {
+  const defined = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!key.startsWith("VITE_")) continue;
+    defined[`import.meta.env.${key}`] = JSON.stringify(value);
+  }
+  return defined;
+}
 
 function plannerChatEndpointFor(baseOrEndpoint) {
   const trimmed = (baseOrEndpoint || "").trim().replace(/\/+$/, "");
@@ -37,10 +60,32 @@ function readJsonBody(req) {
       }
       try {
         resolve(JSON.parse(raw));
-      } catch {
+      } catch (error) {
         reject(new Error("Invalid JSON body"));
       }
     });
+    req.on("error", reject);
+  });
+}
+
+function readRawBody(req, maxBytes = 30_000_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error("Request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("end", () => {
+      resolve(Buffer.concat(chunks));
+    });
+
     req.on("error", reject);
   });
 }
@@ -153,7 +198,7 @@ function plannerLoggingProxy(env) {
         } catch (error) {
           console.log("PLANNER RESPONSE");
           console.log(`id: ${requestId}`);
-          console.log("status: network_error");
+          console.log(`status: network_error`);
           console.log(`error: ${error.message}`);
           console.log("========================================");
 
@@ -226,7 +271,7 @@ function plannerLoggingProxy(env) {
             }
             console.log("PLANNER RESPONSE");
             console.log(`id: ${requestId}`);
-            console.log("status: stream_error");
+            console.log(`status: stream_error`);
             console.log(`error: ${error.message}`);
             console.log("========================================");
             return;
@@ -237,7 +282,7 @@ function plannerLoggingProxy(env) {
           console.log(`id: ${requestId}`);
           console.log(`status: ${upstreamResponse.status}`);
           console.log(`duration_ms: ${elapsedMs}`);
-          console.log("mode: stream");
+          console.log(`mode: stream`);
           console.log(`chunks: ${chunkCount}`);
           console.log(`assistant-preview: ${previewText(assistantAggregate) || "[empty]"}`);
           console.log("========================================");
@@ -247,14 +292,14 @@ function plannerLoggingProxy(env) {
         let upstreamText = "";
         try {
           upstreamText = await upstreamResponse.text();
-        } catch {
+        } catch (error) {
           upstreamText = "";
         }
 
         let parsed;
         try {
           parsed = JSON.parse(upstreamText);
-        } catch {
+        } catch (error) {
           parsed = null;
         }
 
@@ -337,19 +382,95 @@ function exaProxy(env) {
   };
 }
 
-export default defineConfig(({ mode }) => {
-  const env = {
-    ...loadEnv(mode, path.resolve(process.cwd(), ".."), ""),
-    ...loadEnv(mode, process.cwd(), "")
-  };
+function speechProxy(env) {
+  const speechApiKey = env.GROQ_API_KEY || env.VITE_GROQ_API_KEY || "";
+  const speechApiEndpoint = env.SPEECH_API_ENDPOINT || DEFAULT_SPEECH_API_ENDPOINT;
+  const speechProxyPath = env.VITE_SPEECH_PROXY_PATH || DEFAULT_SPEECH_PROXY_PATH;
 
   return {
-    plugins: [react(), plannerLoggingProxy(env), exaProxy(env)],
+    name: "speech-proxy",
+    configureServer(server) {
+      server.middlewares.use(speechProxyPath, async (req, res) => {
+        if (req.method !== "POST") {
+          res.statusCode = 405;
+          res.end("Method Not Allowed");
+          return;
+        }
+
+        if (!speechApiKey) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "GROQ_API_KEY is not configured." }));
+          return;
+        }
+
+        if (!speechApiEndpoint) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "SPEECH_API_ENDPOINT is not configured." }));
+          return;
+        }
+
+        let rawBody;
+        try {
+          rawBody = await readRawBody(req);
+        } catch (error) {
+          res.statusCode = 400;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: error.message }));
+          return;
+        }
+
+        let upstream;
+        try {
+          upstream = await fetch(speechApiEndpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${speechApiKey}`,
+              "Content-Type": req.headers["content-type"] || "multipart/form-data",
+              Accept: "application/json"
+            },
+            body: rawBody
+          });
+        } catch (error) {
+          res.statusCode = 502;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: `Speech request failed: ${error.message}` }));
+          return;
+        }
+
+        const text = await upstream.text();
+        res.statusCode = upstream.status;
+        res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
+        res.end(text);
+      });
+    }
+  };
+}
+
+export default defineConfig(({ mode }) => {
+  const env = mergedEnvForMode(mode);
+  return {
+    envDir: repoRootDir,
+    define: viteClientDefineFromEnv(env),
+    plugins: [react(), plannerLoggingProxy(env), exaProxy(env), speechProxy(env)],
     server: {
       proxy: {
         "/api": {
-          target: "http://127.0.0.1:8000",
-          changeOrigin: true
+          target: env.VITE_BACKEND_PROXY_TARGET || "http://127.0.0.1:8000",
+          changeOrigin: true,
+          ws: true,
+          bypass(req) {
+            const requestUrl = req.url || "";
+            if (
+              requestUrl.startsWith("/api/planner/chat") ||
+              requestUrl.startsWith("/api/exa/search") ||
+              requestUrl.startsWith("/api/speech/transcribe")
+            ) {
+              return requestUrl;
+            }
+            return undefined;
+          }
         }
       }
     }

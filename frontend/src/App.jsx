@@ -6,6 +6,8 @@ import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
 import downloadIcon from "../assets/icons/download.svg";
 import dropdownIcon from "../assets/icons/dropdown.svg";
+import micIcon from "../assets/icons/mic.svg";
+import waveformIcon from "../assets/icons/waveform.svg";
 import plannerSystemPromptRaw from "../../planner-system-prompt.txt?raw";
 
 const TITLE_TEXT = "Welcome to the Matrix.";
@@ -34,7 +36,13 @@ const CHAT_ENTER_TRANSITION_MS = 620;
 const CHAT_INITIAL_MESSAGE_STAGGER_MS = 500;
 const COMPOSER_DOCK_ANIMATION_MS = 680;
 const ARTIFACT_MODAL_EXIT_MS = 220;
-const THINKING_PLACEHOLDER_TEXT = "Performing matrix multiplications...";
+const THINKING_PLACEHOLDER_OPTIONS = [
+  "Performing matrix multiplications...",
+  "Determining...",
+  "ad - bc = ...",
+  "Grabbing attention...",
+  "Convoluting..."
+];
 const EXA_SUCCESS_PLACEHOLDER_TEXT = "";
 const EXA_FAILURE_PLACEHOLDER_TEXT = "Failed to search with Exa.";
 const STREAM_REVEAL_MIN_CHARS = 2;
@@ -64,8 +72,11 @@ const CHAT_AUTO_SCROLL_THRESHOLD_PX = 40;
 const DEFAULT_PLANNER_MODEL_ENDPOINT = "";
 const DEFAULT_PLANNER_MODEL_ID = "deepseek-r1";
 const DEFAULT_PLANNER_DEV_PROXY_PATH = "/api/planner/chat";
-const DEFAULT_SAVE_GENERATED_CSV_ENDPOINT = "/api/agents/generated-csv";
 const DEFAULT_EXA_PROXY_PATH = "/api/exa/search";
+const DEFAULT_SPEECH_LIVE_WS_PATH = "/api/speech/live";
+const DEFAULT_SPEECH_STREAM_TIMESLICE_MS = 280;
+const SPEECH_FINALIZE_GRACE_MS = 4500;
+const DEFAULT_BROWSER_SPEECH_LANG = "en-US";
 const DEFAULT_CONTEXT_MAX_TOTAL_CHARS = 26000;
 const DEFAULT_CONTEXT_MAX_FILE_CHARS = 5000;
 
@@ -87,10 +98,17 @@ const PLANNER_DEV_PROXY_PATH = (
 ).trim();
 const USE_PLANNER_DEV_PROXY =
   import.meta.env.DEV && import.meta.env.VITE_USE_PLANNER_PROXY !== "false";
-const SAVE_GENERATED_CSV_ENDPOINT = (
-  import.meta.env.VITE_SAVE_GENERATED_CSV_ENDPOINT || DEFAULT_SAVE_GENERATED_CSV_ENDPOINT
-).trim();
 const EXA_PROXY_PATH = (import.meta.env.VITE_EXA_PROXY_PATH || DEFAULT_EXA_PROXY_PATH).trim();
+const SPEECH_LIVE_WS_PATH = (
+  import.meta.env.VITE_SPEECH_LIVE_WS_PATH || DEFAULT_SPEECH_LIVE_WS_PATH
+).trim();
+const SPEECH_STREAM_TIMESLICE_MS = parsePositiveInt(
+  import.meta.env.VITE_SPEECH_STREAM_TIMESLICE_MS,
+  DEFAULT_SPEECH_STREAM_TIMESLICE_MS
+);
+const BROWSER_SPEECH_LANG =
+  (import.meta.env.VITE_BROWSER_SPEECH_LANG || DEFAULT_BROWSER_SPEECH_LANG).trim() ||
+  DEFAULT_BROWSER_SPEECH_LANG;
 const PLANNER_CONTEXT_MAX_TOTAL_CHARS = parsePositiveInt(
   import.meta.env.VITE_PLANNER_CONTEXT_MAX_TOTAL_CHARS,
   DEFAULT_CONTEXT_MAX_TOTAL_CHARS
@@ -135,6 +153,29 @@ const ALLOWED_EXTENSIONS = new Set([
 ]);
 const MAX_TOTAL_FILES = 200;
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+
+function pickThinkingPlaceholder() {
+  const index = Math.floor(Math.random() * THINKING_PLACEHOLDER_OPTIONS.length);
+  return THINKING_PLACEHOLDER_OPTIONS[index] || THINKING_PLACEHOLDER_OPTIONS[0];
+}
+
+function resolveThinkingPlaceholder(message) {
+  const explicit = String(message?.thinkingPlaceholder || "").trim();
+  if (explicit) return explicit;
+  const content = String(message?.content || "").trim();
+  if (THINKING_PLACEHOLDER_OPTIONS.includes(content)) return content;
+  return THINKING_PLACEHOLDER_OPTIONS[0];
+}
+
+function isThinkingPlaceholderMessage(message) {
+  if (!message?.pending) return false;
+  const content = String(message?.content || "").trim();
+  if (message?.uiType === "thinking-placeholder") {
+    const placeholder = resolveThinkingPlaceholder(message);
+    return !content || content === placeholder;
+  }
+  return THINKING_PLACEHOLDER_OPTIONS.includes(content);
+}
 
 function extensionFor(name) {
   const split = name.split(".");
@@ -802,24 +843,26 @@ function buildCsvSummaryMessage(csvText) {
   const n = rows.length;
   const lines = [`Here's a summary of the ${n} generated agent${n !== 1 ? "s" : ""}:`];
 
+  // Connection stats
   if (headers.includes("connections")) {
     const counts = rows.map((row) => {
-      const conns = (row.connections || "").trim();
+      const conns = (row["connections"] || "").trim();
       return conns ? conns.split(/[|;,]/).filter(Boolean).length : 0;
     });
     const avg = (counts.reduce((a, b) => a + b, 0) / n).toFixed(1);
     const min = Math.min(...counts);
     const max = Math.max(...counts);
-    lines.push(`- Connections: avg ${avg} per agent (range ${min}-${max})`);
+    lines.push(`• Connections: avg ${avg} per agent (range ${min}–${max})`);
   }
 
+  // Demographic fields
   const fields = [
     ["gender", "Gender"],
     ["ethnicity", "Ethnicity"],
     ["political_lean", "Political lean"],
     ["socioeconomic_status", "Socioeconomic status"],
     ["education", "Education"],
-    ["occupation", "Occupation"]
+    ["occupation", "Occupation"],
   ];
   for (const [field, label] of fields) {
     if (!headers.includes(field)) continue;
@@ -830,13 +873,10 @@ function buildCsvSummaryMessage(csvText) {
     }
     const entries = Object.entries(tally).sort((a, b) => b[1] - a[1]);
     if (!entries.length) continue;
-    lines.push(`- ${label}: ${entries.map(([v, c]) => `${v} (${c})`).join(", ")}`);
+    lines.push(`• ${label}: ${entries.map(([v, c]) => `${v} (${c})`).join(", ")}`);
   }
 
-  lines.push(
-    "",
-    "Would you like to make any changes to the generated agents? Describe edits, or say \"no changes\", \"go ahead\", or \"start simulation\" to begin."
-  );
+  lines.push("\nWould you like to make any changes to the generated agents? Describe what you'd like to adjust, or say \"no changes\" to proceed.");
   return lines.join("\n");
 }
 
@@ -848,6 +888,76 @@ function formatCsvDownloadFilename(runId = "") {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const prefix = safeRunId || "planner-output";
   return `${prefix}-${stamp}.csv`;
+}
+
+const NUMBER_WORD_LOOKUP = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+  sixty: 60,
+  seventy: 70,
+  eighty: 80,
+  ninety: 90,
+  hundred: 100,
+  thousand: 1000
+};
+
+function parseWordNumberToken(input) {
+  const normalized = String(input || "")
+    .toLowerCase()
+    .replace(/[^a-z\s-]/g, " ")
+    .replace(/-/g, " ")
+    .trim();
+  if (!normalized) return null;
+
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+
+  let total = 0;
+  let current = 0;
+
+  for (const token of tokens) {
+    const value = NUMBER_WORD_LOOKUP[token];
+    if (!Number.isFinite(value)) return null;
+
+    if (token === "hundred") {
+      current = (current || 1) * 100;
+      continue;
+    }
+
+    if (token === "thousand") {
+      total += (current || 1) * 1000;
+      current = 0;
+      continue;
+    }
+
+    current += value;
+  }
+
+  const result = total + current;
+  if (!Number.isFinite(result) || result <= 0) return null;
+  return result;
 }
 
 function extractRequestedSampleCountFromPrompt(promptText) {
@@ -995,34 +1105,6 @@ function downloadCsvArtifact(csvPayload, runId = "") {
   return true;
 }
 
-async function persistGeneratedCsvArtifact(csvPayload) {
-  const normalized = String(csvPayload || "").trim();
-  if (!normalized || !SAVE_GENERATED_CSV_ENDPOINT) {
-    return null;
-  }
-
-  const response = await fetch(SAVE_GENERATED_CSV_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ csv_text: normalized })
-  });
-
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const parsed = await response.json();
-      detail = typeof parsed?.detail === "string" ? parsed.detail : "";
-    } catch {
-      detail = "";
-    }
-    throw new Error(
-      `Failed to persist generated CSV (${response.status})${detail ? `: ${detail}` : ""}`
-    );
-  }
-
-  return response.json();
-}
-
 function CsvArtifactCard({
   summary,
   pending = false,
@@ -1067,7 +1149,7 @@ function CsvArtifactCard({
         <div className="csv-artifact-badge">CSV</div>
         <div className="csv-artifact-copy">
           <p className="csv-artifact-title">Generated Agent Data</p>
-          {progressLabel ? <p className="csv-artifact-meta">{progressLabel}</p> : null}
+          <p className="csv-artifact-meta">{progressLabel}</p>
         </div>
       </button>
       <button
@@ -1231,6 +1313,7 @@ function renderMessageContent(message, options = {}) {
   }
 
   const messageText = String(message.content || "");
+  const thinkingPlaceholderText = resolveThinkingPlaceholder(message);
   if (message.uiType === "status-tooltip") {
     return (
       <div className="chat-meta-log">
@@ -1262,12 +1345,12 @@ function renderMessageContent(message, options = {}) {
       </div>
     ) : null;
 
-  if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
+  if (isThinkingPlaceholderMessage(message)) {
     return (
       <>
         {exaMetaBlock}
         <div className="chat-meta-think">
-          <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
+          <p className="chat-thinking-placeholder">{thinkingPlaceholderText}</p>
         </div>
       </>
     );
@@ -1278,7 +1361,7 @@ function renderMessageContent(message, options = {}) {
   const hasThinkText = thinkText.trim().length > 0;
   const hasAnswerText = answerText.trim().length > 0;
   const thinkLabel = message.pending
-    ? THINKING_PLACEHOLDER_TEXT
+    ? thinkingPlaceholderText
     : thoughtDurationLabel(message.thinkingDurationSec);
   const primaryAnswerText = hasAnswerText ? answerText : messageText;
   const csvSummary = summarizeCsvArtifact(primaryAnswerText);
@@ -1292,14 +1375,16 @@ function renderMessageContent(message, options = {}) {
       ? message.requestedSampleCount
       : null;
   const shouldHoldPendingThinkingStyle =
-    Boolean(message.pending) && (hasThinkText || messageText.trim() === THINKING_PLACEHOLDER_TEXT) && !hasAnswerText;
+    Boolean(message.pending) &&
+    (hasThinkText || isThinkingPlaceholderMessage(message)) &&
+    !hasAnswerText;
 
   if (shouldHoldPendingThinkingStyle) {
     return (
       <>
         {exaMetaBlock}
         <div className="chat-meta-think">
-          <p className="chat-thinking-placeholder">{THINKING_PLACEHOLDER_TEXT}</p>
+          <p className="chat-thinking-placeholder">{thinkingPlaceholderText}</p>
         </div>
       </>
     );
@@ -1393,7 +1478,7 @@ function messageShouldRenderCsvArtifact(message) {
   if (message.uiType === "status-tooltip") return false;
 
   const messageText = String(message.content || "");
-  if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
+  if (isThinkingPlaceholderMessage(message)) {
     return false;
   }
 
@@ -1408,7 +1493,7 @@ function messageHasThinkSection(message) {
   if (message.uiType === "status-tooltip") return false;
 
   const messageText = String(message.content || "");
-  if (message.pending && messageText.trim() === THINKING_PLACEHOLDER_TEXT) {
+  if (isThinkingPlaceholderMessage(message)) {
     return false;
   }
 
@@ -1644,13 +1729,18 @@ function App() {
   const [isArtifactModalClosing, setIsArtifactModalClosing] = useState(false);
   const [queuedArtifactDownloadIds, setQueuedArtifactDownloadIds] = useState(() => new Set());
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRecordingSpeech, setIsRecordingSpeech] = useState(false);
+  const [isTranscribingSpeech, setIsTranscribingSpeech] = useState(false);
+  const [isSpeechDrivenInput, setIsSpeechDrivenInput] = useState(false);
   const [isChatMode, setIsChatMode] = useState(false);
   const [isHeroCompacted, setIsHeroCompacted] = useState(false);
   const [isGraphPanelOpen, setIsGraphPanelOpen] = useState(false);
   const [graphPanelGraph, setGraphPanelGraph] = useState(null);
-  const [graphAvatarsEnabled, setGraphAvatarsEnabled] = useState(false);
   const [graphPanelWidth, setGraphPanelWidth] = useState(GRAPH_PANEL_DEFAULT_WIDTH);
   const [isGraphPanelResizing, setIsGraphPanelResizing] = useState(false);
+  const [simulationData, setSimulationData] = useState(null);
+  const [simulationStatus, setSimulationStatus] = useState(null);
+  const simulationPollRef = useRef(null);
   const [chatMessages, setChatMessages] = useState([]);
   const [placeholderText, setPlaceholderText] = useState(
     examplePrompts[0].startsWith(SHARED_PREFIX) ? SHARED_PREFIX : ""
@@ -1662,6 +1752,14 @@ function App() {
   const [clarifyState, setClarifyState] = useState(null);
   const [editState, setEditState] = useState(null);
   const fileInputRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const speechChunksRef = useRef([]);
+  const speechSocketRef = useRef(null);
+  const speechRecognitionRef = useRef(null);
+  const speechPrefixTextRef = useRef("");
+  const speechFinalizeTimerRef = useRef(0);
+  const scenarioTextRef = useRef(scenarioText);
   const chatScrollRef = useRef(null);
   const composerShellRef = useRef(null);
   const heroCopyRef = useRef(null);
@@ -1682,6 +1780,16 @@ function App() {
   useEffect(() => {
     contextFilesRef.current = contextFiles;
   }, [contextFiles]);
+
+  useEffect(() => {
+    scenarioTextRef.current = scenarioText;
+  }, [scenarioText]);
+
+  useEffect(() => {
+    if (!scenarioText.trim()) {
+      setIsSpeechDrivenInput(false);
+    }
+  }, [scenarioText]);
 
   const isChatActive = isChatMode;
   const clampGraphPanelWidth = (candidateWidth) => {
@@ -1855,8 +1963,308 @@ function App() {
         window.clearTimeout(artifactModalCloseTimerRef.current);
         artifactModalCloseTimerRef.current = 0;
       }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop();
+      }
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+      }
+      if (speechSocketRef.current) {
+        speechSocketRef.current.close();
+        speechSocketRef.current = null;
+      }
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.stop();
+        } catch {
+          // no-op
+        }
+        speechRecognitionRef.current = null;
+      }
+      if (speechFinalizeTimerRef.current) {
+        window.clearTimeout(speechFinalizeTimerRef.current);
+        speechFinalizeTimerRef.current = 0;
+      }
     };
   }, []);
+
+  const appendSpeechErrorMessage = (errorText) => {
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: createRuntimeId("assistant"),
+        role: "assistant",
+        content: `Speech-to-text failed: ${errorText}`,
+        uiType: "status-tooltip",
+        error: true
+      }
+    ]);
+  };
+
+  const resolveSpeechLiveWebSocketUrl = () => {
+    const configured = String(SPEECH_LIVE_WS_PATH || "").trim();
+    if (/^wss?:\/\//i.test(configured)) return configured;
+    const base = window.location.origin.replace(/^http/i, "ws");
+    const path = configured.startsWith("/") ? configured : `/${configured}`;
+    return `${base}${path}`;
+  };
+
+  const openSpeechLiveSocket = () =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(resolveSpeechLiveWebSocketUrl());
+      ws.binaryType = "arraybuffer";
+
+      const timeoutId = window.setTimeout(() => {
+        ws.close();
+        reject(new Error("Timed out connecting to live speech endpoint."));
+      }, 5000);
+
+      ws.onopen = () => {
+        window.clearTimeout(timeoutId);
+        resolve(ws);
+      };
+      ws.onerror = () => {
+        window.clearTimeout(timeoutId);
+        reject(new Error("Failed to connect to live speech endpoint."));
+      };
+    });
+
+  const preferredRecorderMimeType = () => {
+    if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+      return "";
+    }
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/ogg;codecs=opus",
+      "audio/ogg"
+    ];
+    for (const candidate of candidates) {
+      if (MediaRecorder.isTypeSupported(candidate)) {
+        return candidate;
+      }
+    }
+    return "";
+  };
+
+  const startBrowserInterimRecognition = () => {
+    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) return;
+
+    try {
+      const recognition = new SpeechRecognitionCtor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = BROWSER_SPEECH_LANG;
+
+      let finalText = "";
+      recognition.onresult = (event) => {
+        let interimText = "";
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          const result = event.results[i];
+          const transcript = String(result?.[0]?.transcript || "").trim();
+          if (!transcript) continue;
+          if (result.isFinal) {
+            finalText = [finalText, transcript].filter(Boolean).join(" ").trim();
+          } else {
+            interimText = [interimText, transcript].filter(Boolean).join(" ").trim();
+          }
+        }
+        const spoken = [finalText, interimText].filter(Boolean).join(" ").trim();
+        if (!spoken) return;
+        const prefix = speechPrefixTextRef.current;
+        const combined = [prefix, spoken].filter(Boolean).join(" ").trim();
+        setIsSpeechDrivenInput(true);
+        scenarioTextRef.current = combined;
+        setScenarioText(combined);
+      };
+      recognition.onerror = () => {
+        // Fallback silently to whisper live stream only.
+      };
+      recognition.onend = () => {
+        speechRecognitionRef.current = null;
+      };
+
+      recognition.start();
+      speechRecognitionRef.current = recognition;
+    } catch {
+      // Fallback silently to whisper live stream only.
+    }
+  };
+
+  const closeSpeechResources = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+    if (speechSocketRef.current) {
+      try {
+        speechSocketRef.current.close();
+      } catch {
+        // no-op
+      }
+      speechSocketRef.current = null;
+    }
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {
+        // no-op
+      }
+      speechRecognitionRef.current = null;
+    }
+    if (speechFinalizeTimerRef.current) {
+      window.clearTimeout(speechFinalizeTimerRef.current);
+      speechFinalizeTimerRef.current = 0;
+    }
+    mediaRecorderRef.current = null;
+    speechChunksRef.current = [];
+  };
+
+  const stopSpeechCapture = () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    recorder.stop();
+    setIsRecordingSpeech(false);
+  };
+
+  const startSpeechCapture = async () => {
+    if (!navigator?.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      appendSpeechErrorMessage("Your browser does not support microphone recording.");
+      return;
+    }
+
+    if (isSubmitting || isTranscribingSpeech) return;
+
+    setIsTranscribingSpeech(true);
+
+    let ws;
+    try {
+      ws = await openSpeechLiveSocket();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to connect to live speech endpoint.";
+      appendSpeechErrorMessage(message);
+      setIsTranscribingSpeech(false);
+      return;
+    }
+    speechSocketRef.current = ws;
+    speechPrefixTextRef.current = scenarioTextRef.current.trim();
+    startBrowserInterimRecognition();
+
+    ws.onmessage = (event) => {
+      try {
+        const parsed = JSON.parse(String(event.data || "{}"));
+        if (parsed?.type === "error") {
+          appendSpeechErrorMessage(String(parsed.error || "Live speech endpoint error."));
+          closeSpeechResources();
+          setIsRecordingSpeech(false);
+          setIsTranscribingSpeech(false);
+          return;
+        }
+        const liveText = String(parsed?.text || "").trim();
+        const prefix = speechPrefixTextRef.current;
+        const combined = [prefix, liveText].filter(Boolean).join(" ").trim();
+        if (liveText) {
+          setIsSpeechDrivenInput(true);
+        }
+        if (parsed?.type === "final" || combined.length >= scenarioTextRef.current.length) {
+          scenarioTextRef.current = combined;
+          setScenarioText(combined);
+        }
+
+        if (parsed?.type === "final") {
+          closeSpeechResources();
+          setIsRecordingSpeech(false);
+          setIsTranscribingSpeech(false);
+        }
+      } catch {
+        // Ignore malformed messages.
+      }
+    };
+
+    ws.onerror = () => {
+      appendSpeechErrorMessage("Live speech socket error.");
+      closeSpeechResources();
+      setIsRecordingSpeech(false);
+      setIsTranscribingSpeech(false);
+    };
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Microphone permission was denied.";
+      appendSpeechErrorMessage(message);
+      closeSpeechResources();
+      setIsTranscribingSpeech(false);
+      return;
+    }
+
+    mediaStreamRef.current = stream;
+    speechChunksRef.current = [];
+    const mimeType = preferredRecorderMimeType();
+    const recorder = mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream);
+    mediaRecorderRef.current = recorder;
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: "config",
+          mime_type: recorder.mimeType || mimeType || "audio/webm"
+        })
+      );
+    }
+
+    recorder.addEventListener("dataavailable", async (event) => {
+      if (!event.data || event.data.size === 0) return;
+      speechChunksRef.current.push(event.data);
+      const socket = speechSocketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      try {
+        const mimeType = recorder.mimeType || "audio/webm";
+        const snapshotBlob = new Blob(speechChunksRef.current, { type: mimeType });
+        const bytes = await snapshotBlob.arrayBuffer();
+        socket.send(bytes);
+      } catch {
+        appendSpeechErrorMessage("Failed to stream audio chunk.");
+      }
+    });
+
+    recorder.addEventListener("stop", async () => {
+      setIsTranscribingSpeech(true);
+      try {
+        const socket = speechSocketRef.current;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send("finalize");
+        }
+      } catch {
+        // no-op
+      } finally {
+        speechFinalizeTimerRef.current = window.setTimeout(() => {
+          closeSpeechResources();
+          setIsTranscribingSpeech(false);
+        }, SPEECH_FINALIZE_GRACE_MS);
+      }
+    });
+
+    recorder.start(SPEECH_STREAM_TIMESLICE_MS);
+    setIsRecordingSpeech(true);
+    setIsTranscribingSpeech(false);
+  };
+
+  const handleSpeechButtonClick = () => {
+    if (isRecordingSpeech) {
+      stopSpeechCapture();
+      return;
+    }
+    void startSpeechCapture();
+  };
+
+  const hasTypedInput = scenarioText.trim().length > 0 && !isSpeechDrivenInput;
 
   useEffect(() => {
     const handleResize = () => {
@@ -1892,6 +2300,43 @@ function App() {
       window.removeEventListener("pointerup", handlePointerStop);
       window.removeEventListener("pointercancel", handlePointerStop);
     };
+  }, []);
+
+  const handleRunSimulation = async () => {
+    if (simulationStatus?.state === "running") return;
+    setSimulationData(null);
+    setSimulationStatus({ state: "running", progress: 0, total: 0, day: 0 });
+    try {
+      await fetch("/api/simulation/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(graphPanelGraph || {}),
+      });
+    } catch {
+      setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: "Network error" });
+      return;
+    }
+    if (simulationPollRef.current) clearInterval(simulationPollRef.current);
+    simulationPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch("/api/simulation/status");
+        const status = await res.json();
+        setSimulationStatus(status);
+        if (status.state === "done") {
+          clearInterval(simulationPollRef.current);
+          simulationPollRef.current = null;
+          const r = await fetch("/api/simulation/results");
+          if (r.ok) setSimulationData(await r.json());
+        } else if (status.state === "error") {
+          clearInterval(simulationPollRef.current);
+          simulationPollRef.current = null;
+        }
+      } catch { /* keep polling */ }
+    }, 2000);
+  };
+
+  useEffect(() => {
+    return () => { if (simulationPollRef.current) clearInterval(simulationPollRef.current); };
   }, []);
 
   const handleGraphPanelResizeStart = (event) => {
@@ -2359,7 +2804,11 @@ function App() {
         setChatMessages((prev) =>
           prev.map((msg) =>
             msg.id === assistantTurnId
-              ? { ...msg, content: displayedText || THINKING_PLACEHOLDER_TEXT, pending: true }
+              ? {
+                  ...msg,
+                  content: displayedText || msg.thinkingPlaceholder || THINKING_PLACEHOLDER_OPTIONS[0],
+                  pending: true
+                }
               : msg
           )
         );
@@ -2448,7 +2897,6 @@ function App() {
   };
 
   const runMainQuery = async (enrichedPrompt, filesForSubmit, assistantPendingTurnId) => {
-    setGraphAvatarsEnabled(false);
     const plannerContext = await buildPlannerContextBlock(filesForSubmit);
     const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
     const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
@@ -2516,7 +2964,7 @@ function App() {
 
     const summaryMessage = buildCsvSummaryMessage(csvPayload);
     if (summaryMessage) {
-      const csvRunId = csvHeaders.includes("run_id") ? String(csvRows[0]?.run_id || "") : "";
+      const csvRunId = csvHeaders.includes("run_id") ? String(csvRows[0]?.["run_id"] || "") : "";
       setChatMessages((prev) => [
         ...prev,
         { id: createRuntimeId("assistant"), role: "assistant", content: summaryMessage }
@@ -2534,7 +2982,6 @@ function App() {
     changeRequest,
     assistantTurnId
   ) => {
-    setGraphAvatarsEnabled(false);
     const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
     const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
     if (!plannerRequestUrl) throw new Error("Planner endpoint is not configured.");
@@ -2584,7 +3031,7 @@ function App() {
 
     const summaryMessage = buildCsvSummaryMessage(csvPayload);
     if (summaryMessage) {
-      const csvRunId = csvHeaders.includes("run_id") ? String(csvRows[0]?.run_id || "") : "";
+      const csvRunId = csvHeaders.includes("run_id") ? String(csvRows[0]?.["run_id"] || "") : "";
       setChatMessages((prev) => [
         ...prev,
         { id: createRuntimeId("assistant"), role: "assistant", content: summaryMessage }
@@ -2597,65 +3044,39 @@ function App() {
     }
   };
 
-  const finalizeSimulationFromCsv = async (csvPayload, runId) => {
-    setGraphAvatarsEnabled(false);
-    const didDownload = downloadCsvArtifact(csvPayload, runId);
-    let persistSucceeded = false;
-    let persistError = "";
-    try {
-      await persistGeneratedCsvArtifact(csvPayload);
-      persistSucceeded = true;
-    } catch (error) {
-      persistError =
-        error instanceof Error ? error.message : "Failed to persist generated CSV to backend.";
-      console.warn(persistError);
-    }
-    setGraphAvatarsEnabled(persistSucceeded);
-
-    const successMessage = didDownload
-      ? "Simulation started! Your agents are now active in the Matrix. CSV downloaded and processing kicked off."
-      : "Simulation started! Your agents are now active in the Matrix. Processing kicked off.";
-    const warningMessage = persistError
-      ? `Simulation started, but backend processing failed: ${persistError}`
-      : "";
-
-    setChatMessages((prev) => [
-      ...prev,
-      { id: createRuntimeId("assistant"), role: "assistant", content: successMessage },
-      ...(warningMessage
-        ? [{ id: createRuntimeId("assistant"), role: "assistant", content: warningMessage, error: true }]
-        : [])
-    ]);
-  };
-
   const handleComposerSubmit = async (event) => {
     event.preventDefault();
-    const promptText = scenarioText.trim();
+    if (isRecordingSpeech) {
+      stopSpeechCapture();
+    }
+    const promptText = scenarioTextRef.current.trim();
 
+    // If we're waiting for edit feedback after CSV generation
     if (editState) {
       if (!promptText) return;
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
-      const simulationStartPattern =
-        /^(no|no changes?|looks? good|proceed|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah|go ahead|start( simulation)?|begin|launch|ship it)\b/i;
-      if (simulationStartPattern.test(promptText.trim())) {
-        const { csvPayload: currentCsv, runId } = editState;
-        setEditState(null);
-        setScenarioText("");
-        setIsSubmitting(true);
-        setChatMessages((prev) => [...prev, userTurn]);
-        try {
-          await finalizeSimulationFromCsv(currentCsv, runId || "");
-        } finally {
-          setIsSubmitting(false);
-        }
+      const noChangesPattern = /^(no|no changes?|looks? good|proceed|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah)\b/i;
+      if (noChangesPattern.test(promptText.trim())) {
+      setEditState(null);
+      setScenarioText("");
+      scenarioTextRef.current = "";
+      setChatMessages((prev) => [
+          ...prev,
+          userTurn,
+          { id: createRuntimeId("assistant"), role: "assistant", content: "Simulation started! Your agents are now active in the Matrix." }
+        ]);
+        handleRunSimulation();
         return;
       }
 
+      // If the prompt looks like a brand-new simulation request, exit edit mode
+      // and let the normal flow handle it (avoids sending old CSV + new scenario to model)
       const wordCount = promptText.trim().split(/\s+/).length;
       const containsSimulateKeyword = /\bsimulate\b|\bsimulation\b|\bhelp me\b/i.test(promptText);
       const isNewSimulation = wordCount > 25 || containsSimulateKeyword;
       if (isNewSimulation) {
         setEditState(null);
+        // Fall through to normal submit flow below
       } else {
         const assistantPendingTurnId = createRuntimeId("assistant");
         const { csvPayload: currentCsv } = editState;
@@ -2663,6 +3084,7 @@ function App() {
         const requestedSampleCount = inferEditTargetSampleCount(currentCsv, promptText);
         setEditState(null);
         setScenarioText("");
+        scenarioTextRef.current = "";
         setIsSubmitting(true);
         setChatMessages((prev) => [
           ...prev,
@@ -2687,16 +3109,7 @@ function App() {
           setChatMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantPendingTurnId
-                ? {
-                    ...msg,
-                    content: `Edit request failed: ${error.message || "Unknown error."}`,
-                    pending: false,
-                    error: true,
-                    thinkingDurationSec: Math.max(
-                      0.1,
-                      (failureTimeMs - (typeof msg.startedAtMs === "number" ? msg.startedAtMs : failureTimeMs)) / 1000
-                    )
-                  }
+                ? { ...msg, content: `Edit request failed: ${error.message || "Unknown error."}`, pending: false, error: true, thinkingDurationSec: Math.max(0.1, (failureTimeMs - (typeof msg.startedAtMs === "number" ? msg.startedAtMs : failureTimeMs)) / 1000) }
                 : msg
             )
           );
@@ -2720,9 +3133,11 @@ function App() {
 
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
       const assistantPendingTurnId = createRuntimeId("assistant");
+      const thinkingPlaceholder = pickThinkingPlaceholder();
 
       setClarifyState(null);
       setScenarioText("");
+      scenarioTextRef.current = "";
       setIsSubmitting(true);
       setChatMessages((prev) => [
         ...prev,
@@ -2730,8 +3145,10 @@ function App() {
         {
           id: assistantPendingTurnId,
           role: "assistant",
-          content: THINKING_PLACEHOLDER_TEXT,
+          content: thinkingPlaceholder,
           pending: true,
+          uiType: "thinking-placeholder",
+          thinkingPlaceholder,
           startedAtMs: Date.now(),
           requestedSampleCount
         }
@@ -2778,14 +3195,24 @@ function App() {
 
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText || "[No prompt provided]" };
       const clarifyMsgId = createRuntimeId("assistant");
+      const clarifyThinkingPlaceholder = pickThinkingPlaceholder();
       const requestedSampleCount = extractRequestedSampleCountFromPrompt(promptText);
 
       setChatMessages((prev) => [
         ...prev,
         userTurn,
-        { id: clarifyMsgId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, exaStatus: "searching" }
+        {
+          id: clarifyMsgId,
+          role: "assistant",
+          content: clarifyThinkingPlaceholder,
+          pending: true,
+          uiType: "thinking-placeholder",
+          thinkingPlaceholder: clarifyThinkingPlaceholder,
+          exaStatus: "searching"
+        }
       ]);
       setScenarioText("");
+      scenarioTextRef.current = "";
       window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
 
       const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
@@ -2846,13 +3273,16 @@ function App() {
       const cleanedClarifyText = stripThinkSections(clarifyText);
       if (cleanedClarifyText.trim().toUpperCase() === "NO_FOLLOWUPS") {
         const assistantPendingTurnId = createRuntimeId("assistant");
+        const generationThinkingPlaceholder = pickThinkingPlaceholder();
         setChatMessages((prev) => [
           ...prev.filter((m) => m.id !== clarifyMsgId),
           {
             id: assistantPendingTurnId,
             role: "assistant",
-            content: THINKING_PLACEHOLDER_TEXT,
+            content: generationThinkingPlaceholder,
             pending: true,
+            uiType: "thinking-placeholder",
+            thinkingPlaceholder: generationThinkingPlaceholder,
             startedAtMs: Date.now(),
             requestedSampleCount
           }
@@ -2877,13 +3307,16 @@ function App() {
       if (questionLines.length === 0) {
         // Timed out or failed — go straight to main response
         const assistantPendingTurnId = createRuntimeId("assistant");
+        const generationThinkingPlaceholder = pickThinkingPlaceholder();
         setChatMessages((prev) => [
           ...prev.filter((m) => m.id !== clarifyMsgId),
           {
             id: assistantPendingTurnId,
             role: "assistant",
-            content: THINKING_PLACEHOLDER_TEXT,
+            content: generationThinkingPlaceholder,
             pending: true,
+            uiType: "thinking-placeholder",
+            thinkingPlaceholder: generationThinkingPlaceholder,
             startedAtMs: Date.now(),
             requestedSampleCount
           }
@@ -2957,7 +3390,11 @@ function App() {
 
       <aside className={`graph-panel-shell ${isGraphPanelOpen ? "open" : ""}`} aria-hidden={!isGraphPanelOpen}>
         <section className="graph-panel" aria-label="Network graph panel">
-          <GraphCirclePanel graph={graphPanelGraph} avatarsEnabled={graphAvatarsEnabled} />
+          <GraphCirclePanel
+            graph={graphPanelGraph}
+            simulationData={simulationData}
+            simulationStatus={simulationStatus}
+          />
         </section>
         <button
           type="button"
@@ -3100,12 +3537,49 @@ function App() {
                 <input
                   type="text"
                   value={scenarioText}
-                  onChange={(event) => setScenarioText(event.target.value)}
+                  onChange={(event) => {
+                    const nextValue = event.target.value;
+                    setIsSpeechDrivenInput(false);
+                    scenarioTextRef.current = nextValue;
+                    setScenarioText(nextValue);
+                  }}
                   placeholder={placeholderText}
                   aria-label="Simulation scenario"
                 />
-                <button className="send-btn" type="submit" aria-label="Submit simulation" disabled={isSubmitting}>
-                  <img src={arrowUpIcon} alt="" />
+                <button
+                  className={`composer-mic-btn ${isRecordingSpeech ? "recording" : ""}`}
+                  type="button"
+                  aria-label={
+                    isRecordingSpeech
+                      ? "Stop voice capture and transcribe"
+                      : "Start voice capture with speech-to-text"
+                  }
+                  title={
+                    isRecordingSpeech
+                      ? "Stop recording"
+                      : isTranscribingSpeech
+                        ? "Transcribing..."
+                        : "Voice input"
+                  }
+                  disabled={isSubmitting || isTranscribingSpeech}
+                  onClick={handleSpeechButtonClick}
+                >
+                  <img src={micIcon} alt="" />
+                </button>
+                <button
+                  className={`send-btn composer-primary-action ${isRecordingSpeech ? "recording" : ""}`}
+                  type={hasTypedInput ? "submit" : "button"}
+                  aria-label={
+                    hasTypedInput
+                      ? "Submit simulation"
+                      : isRecordingSpeech
+                        ? "Stop voice capture and transcribe"
+                        : "Start voice capture with speech-to-text"
+                  }
+                  disabled={isSubmitting || isTranscribingSpeech}
+                  onClick={hasTypedInput ? undefined : handleSpeechButtonClick}
+                >
+                  <img src={hasTypedInput ? arrowUpIcon : waveformIcon} alt="" />
                 </button>
               </div>
             </div>

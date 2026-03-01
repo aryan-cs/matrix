@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Room, RoomEvent, Track } from "livekit-client";
 import callIcon from "../../assets/icons/call.svg";
 import notesIcon from "../../assets/icons/notes.svg";
 
@@ -25,39 +24,18 @@ const DETAIL_FIELDS = [
   ["home_address", "Location"]
 ];
 
-const TERMINAL_TYPE_INTERVAL_MS = 18;
-const TERMINAL_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const TERMINAL_SPINNER_INTERVAL_MS = 110;
-const SUMMARY_DEFAULT_MODEL_ENDPOINT = "";
-const SUMMARY_DEFAULT_MODEL_ID = "deepseek-r1";
-const SUMMARY_DEFAULT_PROXY_PATH = "/api/planner/chat";
-const AGENTS_ENDPOINT = "/api/avatar/agents";
-const START_ENDPOINT = "/api/avatar/session/start";
-const PORTRAIT_ENDPOINT = "/api/portrait";
-
-const SUMMARY_MODEL_ENDPOINT = (
-  import.meta.env.VITE_PLANNER_CONTEXT_ENDPOINT ||
-  import.meta.env.VITE_PLANNER_MODEL_ENDPOINT ||
-  SUMMARY_DEFAULT_MODEL_ENDPOINT
-).trim();
-const SUMMARY_MODEL_ID = (import.meta.env.VITE_PLANNER_MODEL_ID || SUMMARY_DEFAULT_MODEL_ID).trim();
-const SUMMARY_API_KEY = (import.meta.env.VITE_PLANNER_API_KEY || "").trim();
-const SUMMARY_PROXY_PATH = (
-  import.meta.env.VITE_PLANNER_PROXY_PATH || SUMMARY_DEFAULT_PROXY_PATH
-).trim();
-const USE_SUMMARY_PROXY =
-  import.meta.env.DEV && import.meta.env.VITE_USE_PLANNER_PROXY !== "false";
-
-function plannerChatEndpointFor(baseOrEndpoint) {
-  const trimmed = (baseOrEndpoint || "").trim().replace(/\/+$/, "");
-  if (!trimmed) return "";
-  if (trimmed.endsWith("/v1/chat/completions")) return trimmed;
-  return `${trimmed}/v1/chat/completions`;
+function formatDetailValue(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized || "—";
 }
 
-function buildNodeSummaryContext(selectedNode, nodeById, adjacencyById) {
-  if (!selectedNode) return null;
+function buildNodeDetailRows(selectedNode, nodeById, adjacencyById) {
+  if (!selectedNode) return [];
 
+  const metadata =
+    selectedNode.metadata && typeof selectedNode.metadata === "object"
+      ? selectedNode.metadata
+      : {};
   const preferredConnections = Array.isArray(selectedNode.connections)
     ? selectedNode.connections
     : [];
@@ -71,169 +49,23 @@ function buildNodeSummaryContext(selectedNode, nodeById, adjacencyById) {
         .filter((id) => id && id !== selectedNode.id)
     )
   );
-  const connectionNames =
-    connectionIds.length > 0
-      ? connectionIds.map((id) => nodeById.get(id)?.label || id)
-      : ["No direct connections listed."];
+  const connectionNames = connectionIds.map((id) => nodeById.get(id)?.label || id);
 
-  const metadata =
-    selectedNode.metadata && typeof selectedNode.metadata === "object"
-      ? selectedNode.metadata
-      : {};
-
-  const lines = [];
-  lines.push(`> agent_id: ${selectedNode.id}`);
-  lines.push(`> name: ${selectedNode.label || selectedNode.id}`);
-
+  const detailRows = [{ key: "agent_id", label: "Agent ID", value: selectedNode.id }];
   for (const [key, label] of DETAIL_FIELDS) {
-    const value = String(metadata[key] ?? "").trim();
-    if (!value) continue;
-    lines.push(`${label}: ${value}`);
+    detailRows.push({
+      key,
+      label,
+      value: formatDetailValue(metadata[key])
+    });
   }
-
-  return {
-    agent_id: selectedNode.id,
-    name: selectedNode.label || selectedNode.id,
-    metadata,
-    connection_names: connectionNames,
-    display_lines: lines
-  };
-}
-
-function buildFallbackSummary(context) {
-  if (!context) return "";
-
-  const metadata = context.metadata || {};
-  const age = String(metadata.age || "").trim();
-  const occupation = String(metadata.occupation || "").trim();
-  const segment = String(metadata.segment_key || "").trim();
-  const politicalLean = String(metadata.political_lean || "").trim();
-  const priorities = String(metadata.policy_priorities || "").trim();
-  const connections = Array.isArray(context.connection_names) ? context.connection_names : [];
-
-  const line1Parts = [
-    context.name,
-    age ? `(${age})` : "",
-    occupation ? `is a ${occupation}` : "is a representative agent",
-    segment ? `in ${segment.replaceAll("_", " ")}` : ""
-  ].filter(Boolean);
-  const line2Parts = [
-    politicalLean ? `Lean: ${politicalLean}.` : "",
-    priorities ? `Priorities: ${priorities}.` : "",
-    connections.length > 0
-      ? `Likely talks with: ${connections.slice(0, 4).join(", ")}.`
-      : "No direct network links were provided."
-  ].filter(Boolean);
-
-  const line1 = `> ${line1Parts.join(" ").replace(/\s+/g, " ").trim()}.`;
-  const line2 = `> ${line2Parts.join(" ").replace(/\s+/g, " ").trim()}`;
-  return `${line1}\n${line2}`;
-}
-
-function extractPostThinkText(text) {
-  const raw = String(text || "").replace(/\r\n/g, "\n");
-  if (!raw) return "";
-
-  const closeTagRegex = /<\/think\s*>/gi;
-  let lastCloseEnd = -1;
-  let closeMatch = closeTagRegex.exec(raw);
-  while (closeMatch) {
-    lastCloseEnd = closeTagRegex.lastIndex;
-    closeMatch = closeTagRegex.exec(raw);
-  }
-
-  if (lastCloseEnd !== -1) {
-    return raw.slice(lastCloseEnd).trim();
-  }
-
-  // Fallback: remove any think blocks/tags if present, then return remaining text.
-  return raw
-    .replace(/<think\s*>[\s\S]*?<\/think\s*>/gi, "")
-    .replace(/<think\s*>[\s\S]*$/gi, "")
-    .replace(/<\/?think\s*>/gi, "")
-    .trim();
-}
-
-function normalizeTwoLineSummary(summaryText, fallbackText) {
-  const fallbackLines = String(fallbackText || "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const rawLines = String(summaryText || "")
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => line.trim().replace(/^[-*>\d.\)\s]+/, ""))
-    .filter(Boolean);
-
-  let lines = rawLines.slice(0, 2);
-  if (lines.length < 2) {
-    const sentenceSplit = String(summaryText || "")
-      .replace(/\s+/g, " ")
-      .split(/(?<=[.!?])\s+/)
-      .map((part) => part.trim())
-      .filter(Boolean);
-    lines = sentenceSplit.slice(0, 2);
-  }
-  if (lines.length < 2) {
-    lines = fallbackLines.map((line) => line.replace(/^>\s*/, "")).slice(0, 2);
-  }
-  if (lines.length === 1) {
-    lines.push("Summary unavailable.");
-  }
-  const joinedSummary = lines
-    .slice(0, 2)
-    .map((line) => String(line || "").trim())
-    .filter(Boolean)
-    .join("  |  ");
-  return `> ${joinedSummary}`;
-}
-
-async function generateNodeSummaryWithLlm(context, signal) {
-  const plannerEndpoint = plannerChatEndpointFor(SUMMARY_MODEL_ENDPOINT);
-  const requestUrl = USE_SUMMARY_PROXY ? SUMMARY_PROXY_PATH : plannerEndpoint;
-  if (!requestUrl) {
-    throw new Error("Planner endpoint is not configured.");
-  }
-
-  const payload = {
-    model: SUMMARY_MODEL_ID,
-    temperature: 0.2,
-    stream: false,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You summarize one simulated representative profile in exactly 2 lines. Keep each line concise, plain text, no markdown lists, no bullets, no numbering, no preamble, and no reasoning text."
-      },
-      {
-        role: "user",
-        content:
-          "Using this node context, write exactly 2 lines that summarize this person and their network relevance.\n\n" +
-          JSON.stringify(context, null, 2)
-      }
-    ]
-  };
-
-  const response = await fetch(requestUrl, {
-    signal,
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(!USE_SUMMARY_PROXY && SUMMARY_API_KEY
-        ? { Authorization: `Bearer ${SUMMARY_API_KEY}` }
-        : {})
-    },
-    body: JSON.stringify(payload)
+  detailRows.push({
+    key: "connected_nodes",
+    label: "Connected Nodes",
+    value: connectionNames.length > 0 ? connectionNames.join(", ") : "—"
   });
 
-  if (!response.ok) {
-    throw new Error(`Summary endpoint responded ${response.status}`);
-  }
-
-  const parsed = await response.json();
-  const rawContent = String(parsed?.choices?.[0]?.message?.content || "").trim();
-  const postThinkContent = extractPostThinkText(rawContent);
-  return postThinkContent || rawContent;
+  return detailRows;
 }
 
 function normalizeGraphData(graph) {
@@ -338,28 +170,69 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
+function SimulationJourney({ data }) {
+  if (!data || !data.days || data.days.length === 0) return null;
+  const [expandedDay, setExpandedDay] = useState(-1);
+
+  return (
+    <div className="sim-journey">
+      <div className="sim-journey-header">Simulation Journey</div>
+
+      <div className="sim-section">
+        <div className="sim-section-label">Initial Reaction — Day 0</div>
+        <div className="sim-section-text">{data.initial}</div>
+      </div>
+
+      {data.days.length > 2 && (
+        <div className="sim-section">
+          <div className="sim-section-label">Evolution</div>
+          <div className="sim-day-list">
+            {data.days.slice(1, -1).map((d) => (
+              <button
+                key={d.day}
+                type="button"
+                className={`sim-day-chip ${expandedDay === d.day ? "active" : ""}`}
+                onClick={() => setExpandedDay(expandedDay === d.day ? -1 : d.day)}
+              >
+                Day {d.day + 1}
+              </button>
+            ))}
+          </div>
+          {expandedDay >= 0 && (() => {
+            const dayData = data.days.find((d) => d.day === expandedDay);
+            if (!dayData) return null;
+            return (
+              <div className="sim-day-expanded">
+                {dayData.talked_to?.length > 0 && (
+                  <div className="sim-talked-to">Talked to: {dayData.talked_to.join(", ")}</div>
+                )}
+                <div>{dayData.content}</div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      <div className="sim-section final">
+        <div className="sim-section-label">Final Position — Day {data.days.length}</div>
+        {data.days[data.days.length - 1]?.talked_to?.length > 0 && (
+          <div className="sim-talked-to">
+            Talked to: {data.days[data.days.length - 1].talked_to.join(", ")}
+          </div>
+        )}
+        <div className="sim-section-text">{data.final}</div>
+      </div>
+    </div>
+  );
+}
+
+function GraphCirclePanel({ graph = null, simulationData = null, simulationStatus = null }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
-  const [terminalText, setTerminalText] = useState("");
-  const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
-  const [summaryCache, setSummaryCache] = useState({});
-  const [summaryLoading, setSummaryLoading] = useState({});
-  const [mappedAgentsById, setMappedAgentsById] = useState({});
-  const [avatarStatus, setAvatarStatus] = useState("Select a node to preview avatar.");
-  const [avatarError, setAvatarError] = useState("");
-  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
-  const [activeCall, setActiveCall] = useState(null);
+  const [journeyModalOpen, setJourneyModalOpen] = useState(false);
   const selectedNodeIdRef = useRef("");
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
-  const terminalScrollRef = useRef(null);
-  const summaryRequestSeqRef = useRef(0);
-  const roomRef = useRef(null);
-  const audioSinkRef = useRef(null);
-  const videoSinkRef = useRef(null);
-  const allowAudioTracksRef = useRef(false);
-  const allowVideoTracksRef = useRef(false);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -380,125 +253,19 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
     () => (selectedNodeId ? nodeById.get(selectedNodeId) || null : null),
     [selectedNodeId, nodeById]
   );
-  const terminalTargetText = useMemo(() => {
-    const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) : null;
-    if (!selectedNode) return "";
-    return summaryCache[selectedNodeId] || "";
-  }, [selectedNodeId, nodeById, summaryCache]);
-  const selectedMappedAgent = useMemo(() => {
-    if (!selectedNodeId) return null;
-    return mappedAgentsById[selectedNodeId] || null;
-  }, [selectedNodeId, mappedAgentsById]);
-  const selectedLiveVideoEnabled = selectedMappedAgent
-    ? selectedMappedAgent.live_video_enabled !== false
-    : false;
-  const selectedPortraitUrl = useMemo(() => {
-    if (!avatarsEnabled || !selectedNodeId) return "";
-    return `${PORTRAIT_ENDPOINT}/${encodeURIComponent(selectedNodeId)}`;
-  }, [avatarsEnabled, selectedNodeId]);
-  const selectedDisplayName = useMemo(() => {
-    if (!selectedNodeId) return "This agent";
-    return String(selectedNode?.label || selectedNodeId).trim() || selectedNodeId;
-  }, [selectedNodeId, selectedNode]);
-  const avatarContextOverride = useMemo(() => {
-    if (!selectedNodeId || !selectedNode) return "";
-    const cached = String(summaryCache[selectedNodeId] || "").trim();
-    if (cached) return cached;
-    const ctx = buildNodeSummaryContext(selectedNode, nodeById, adjacencyById);
-    return String(buildFallbackSummary(ctx) || "").trim();
-  }, [selectedNodeId, selectedNode, summaryCache, nodeById, adjacencyById]);
-  const isSummaryPending = Boolean(selectedNodeId && !summaryCache[selectedNodeId]);
-  const hasActiveCall = Boolean(activeCall && activeCall.nodeId === selectedNodeId);
-
-  const clearAudioSink = () => {
-    const node = audioSinkRef.current;
-    if (!node) return;
-    while (node.firstChild) {
-      node.removeChild(node.firstChild);
-    }
-  };
-
-  const clearVideoSink = () => {
-    const node = videoSinkRef.current;
-    if (!node) return;
-    while (node.firstChild) {
-      node.removeChild(node.firstChild);
-    }
-  };
-
-  const disconnectAvatar = () => {
-    if (roomRef.current) {
-      roomRef.current.disconnect();
-      roomRef.current = null;
-    }
-    clearAudioSink();
-    clearVideoSink();
-    allowAudioTracksRef.current = false;
-    allowVideoTracksRef.current = false;
-  };
-
-  const attachTrack = (track) => {
-    if (track.kind === Track.Kind.Audio) {
-      if (!allowAudioTracksRef.current) return;
-      const node = audioSinkRef.current;
-      if (!node) return;
-      const element = track.attach();
-      element.classList.add("graph-node-avatar-track");
-      element.classList.add("graph-node-avatar-audio-hidden");
-      element.dataset.kind = "audio";
-      element.autoplay = true;
-      element.playsInline = true;
-      element.controls = false;
-      element.preload = "auto";
-      element.muted = false;
-      element.volume = 1;
-      if (typeof element.play === "function") {
-        element.play().catch(() => {
-          // Browser autoplay policy can block hidden audio until a user gesture.
-          setNeedsAudioUnlock(true);
-        });
-      }
-      node.appendChild(element);
-      return;
-    }
-
-    if (track.kind === Track.Kind.Video) {
-      if (!allowVideoTracksRef.current) return;
-      const node = videoSinkRef.current;
-      if (!node) return;
-      const element = track.attach();
-      element.classList.add("graph-node-avatar-track");
-      element.dataset.kind = "video";
-      element.autoplay = true;
-      element.playsInline = true;
-      element.controls = false;
-      element.preload = "auto";
-      node.appendChild(element);
-    }
-  };
-
-  const unlockAudioPlayback = async () => {
-    const sink = audioSinkRef.current;
-    if (!sink) return;
-    const mediaEls = Array.from(sink.querySelectorAll("audio,video"));
-    let playedAny = false;
-    for (const el of mediaEls) {
-      if (typeof el.play !== "function") continue;
-      try {
-        await el.play();
-        playedAny = true;
-      } catch {
-        // Keep trying remaining elements.
-      }
-    }
-    if (playedAny) {
-      setNeedsAudioUnlock(false);
-      setAvatarStatus(`${selectedDisplayName} is connected.`);
-    }
-  };
+  const selectedNodeDetails = useMemo(
+    () => buildNodeDetailRows(selectedNode, nodeById, adjacencyById),
+    [selectedNode, nodeById, adjacencyById]
+  );
+  const detailColumns = useMemo(() => {
+    if (selectedNodeDetails.length === 0) return [[], []];
+    const midpoint = Math.ceil(selectedNodeDetails.length / 2);
+    return [selectedNodeDetails.slice(0, midpoint), selectedNodeDetails.slice(midpoint)];
+  }, [selectedNodeDetails]);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
+    setJourneyModalOpen(false);
   }, [selectedNodeId]);
 
   useEffect(() => {
@@ -506,271 +273,6 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
       setSelectedNodeId("");
     }
   }, [selectedNodeId, nodeById]);
-
-  useEffect(() => {
-    // Switching nodes should not keep the previous call session attached.
-    if (!selectedNodeId) {
-      setActiveCall(null);
-      return;
-    }
-    if (activeCall && activeCall.nodeId !== selectedNodeId) {
-      setActiveCall(null);
-    }
-  }, [selectedNodeId, activeCall]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadMappedAgents = async () => {
-      if (!avatarsEnabled) {
-        setMappedAgentsById({});
-        return;
-      }
-      try {
-        const response = await fetch(AGENTS_ENDPOINT);
-        if (!response.ok) return;
-        const data = await response.json();
-        const list = Array.isArray(data?.agents) ? data.agents : [];
-        const byId = {};
-        for (const item of list) {
-          const id = String(item?.agent_id || "").trim();
-          if (!id) continue;
-          byId[id] = item;
-        }
-        if (!cancelled) {
-          setMappedAgentsById(byId);
-        }
-      } catch {
-        // Leave graph summary UI functional even if avatar API is unavailable.
-      }
-    };
-
-    loadMappedAgents();
-    return () => {
-      cancelled = true;
-    };
-  }, [avatarsEnabled]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const startAvatarForSelectedNode = async () => {
-      if (!avatarsEnabled) {
-        disconnectAvatar();
-        setActiveCall(null);
-        setAvatarError("");
-        setNeedsAudioUnlock(false);
-        setAvatarStatus("Simulation not started yet. Start simulation to enable calls.");
-        return;
-      }
-
-      if (!selectedNodeId) {
-        disconnectAvatar();
-        setAvatarError("");
-        setNeedsAudioUnlock(false);
-        setAvatarStatus("Select a node to preview avatar.");
-        return;
-      }
-
-      if (!selectedMappedAgent) {
-        disconnectAvatar();
-        setAvatarError("");
-        setNeedsAudioUnlock(false);
-        setAvatarStatus(`No avatar mapping found for ${selectedDisplayName}.`);
-        return;
-      }
-
-      const audioRequested = Boolean(activeCall && activeCall.nodeId === selectedNodeId);
-      const shouldStartSession = selectedLiveVideoEnabled || audioRequested;
-      if (!shouldStartSession) {
-        disconnectAvatar();
-        setAvatarError("");
-        setNeedsAudioUnlock(false);
-        setAvatarStatus(`${selectedDisplayName} is ready. Click Call to start voice.`);
-        return;
-      }
-
-      disconnectAvatar();
-      setAvatarError("");
-      setNeedsAudioUnlock(false);
-      allowVideoTracksRef.current = selectedLiveVideoEnabled;
-      allowAudioTracksRef.current = audioRequested;
-      setAvatarStatus(
-        selectedLiveVideoEnabled && !audioRequested
-          ? `${selectedDisplayName} video is connecting...`
-          : `${selectedDisplayName} is connecting...`
-      );
-
-      try {
-        const response = await fetch(START_ENDPOINT, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            agent_id: selectedNodeId,
-            context_override: activeCall.contextOverride || undefined,
-          })
-        });
-        if (!response.ok) {
-          const detail = await response.text();
-          throw new Error(`Session start failed (${response.status}): ${detail}`);
-        }
-
-        const started = await response.json();
-        if (cancelled) return;
-
-        const room = new Room({ adaptiveStream: true, dynacast: true });
-        room.on(RoomEvent.TrackSubscribed, (track) => attachTrack(track));
-        room.on(RoomEvent.TrackUnsubscribed, (track) => {
-          track.detach().forEach((el) => el.remove());
-        });
-        room.on(RoomEvent.ConnectionStateChanged, (state) => {
-          if (!cancelled) {
-            if (state === "connected" && selectedLiveVideoEnabled && !audioRequested) {
-              setAvatarStatus(`${selectedDisplayName} video is live. Click Call to start audio.`);
-            } else {
-              setAvatarStatus(`${selectedDisplayName} is ${state}.`);
-            }
-          }
-        });
-        room.on(RoomEvent.Disconnected, () => {
-          if (!cancelled) {
-            setAvatarStatus(`${selectedDisplayName} disconnected.`);
-          }
-        });
-
-        await room.connect(started.livekit_url, started.livekit_client_token);
-        if (cancelled) {
-          room.disconnect();
-          return;
-        }
-
-        if (audioRequested) {
-          try {
-            await room.localParticipant.setMicrophoneEnabled(true);
-          } catch {
-            // Permission denied or unavailable; keep session alive for playback.
-          }
-        }
-
-        room.remoteParticipants.forEach((participant) => {
-          participant.trackPublications.forEach((publication) => {
-            if (publication.isSubscribed && publication.track) {
-              attachTrack(publication.track);
-            }
-          });
-        });
-
-        roomRef.current = room;
-        setAvatarStatus(
-          selectedLiveVideoEnabled && !audioRequested
-            ? `${selectedDisplayName} video is live. Click Call to start audio.`
-            : `${selectedDisplayName} is connected.`
-        );
-      } catch (error) {
-        if (cancelled) return;
-        disconnectAvatar();
-        setAvatarError(error instanceof Error ? error.message : "Could not start avatar.");
-        setAvatarStatus(`${selectedDisplayName} failed to connect.`);
-      }
-    };
-
-    startAvatarForSelectedNode();
-
-    return () => {
-      cancelled = true;
-      disconnectAvatar();
-    };
-  }, [avatarsEnabled, selectedNodeId, selectedMappedAgent, selectedLiveVideoEnabled, activeCall, selectedDisplayName]);
-
-  useEffect(() => {
-    return () => disconnectAvatar();
-  }, []);
-
-  useEffect(() => {
-    const activeNodeId = selectedNodeId;
-    const selectedNode = activeNodeId ? nodeById.get(activeNodeId) : null;
-    if (!selectedNode || summaryCache[activeNodeId] || summaryLoading[activeNodeId]) {
-      return undefined;
-    }
-
-    const context = buildNodeSummaryContext(selectedNode, nodeById, adjacencyById);
-    const fallbackSummary = buildFallbackSummary(context);
-    const requestSeq = summaryRequestSeqRef.current + 1;
-    summaryRequestSeqRef.current = requestSeq;
-    const controller = new AbortController();
-
-    setSummaryLoading((prev) => ({ ...prev, [activeNodeId]: true }));
-
-    (async () => {
-      try {
-        const rawSummary = await generateNodeSummaryWithLlm(context, controller.signal);
-        if (controller.signal.aborted) return;
-        if (summaryRequestSeqRef.current !== requestSeq) return;
-        const normalized = normalizeTwoLineSummary(rawSummary, fallbackSummary);
-        setSummaryCache((prev) => ({ ...prev, [activeNodeId]: normalized }));
-      } catch {
-        if (controller.signal.aborted) return;
-        if (summaryRequestSeqRef.current !== requestSeq) return;
-        setSummaryCache((prev) => ({ ...prev, [activeNodeId]: fallbackSummary }));
-      } finally {
-        setSummaryLoading((prev) => ({ ...prev, [activeNodeId]: false }));
-      }
-    })();
-
-    return () => {
-      controller.abort();
-      setSummaryLoading((prev) => ({ ...prev, [activeNodeId]: false }));
-    };
-  }, [selectedNodeId, nodeById, adjacencyById, summaryCache]);
-
-  useEffect(() => {
-    if (!isSummaryPending) return undefined;
-
-    setSpinnerFrameIndex(0);
-    const timerId = window.setInterval(() => {
-      setSpinnerFrameIndex((prev) => (prev + 1) % TERMINAL_SPINNER_FRAMES.length);
-    }, TERMINAL_SPINNER_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(timerId);
-    };
-  }, [isSummaryPending]);
-
-  useEffect(() => {
-    if (!selectedNodeId || !terminalTargetText) {
-      setTerminalText("");
-      return undefined;
-    }
-
-    let charIndex = 0;
-    setTerminalText("");
-
-    const timerId = window.setInterval(() => {
-      const remaining = terminalTargetText.length - charIndex;
-      if (remaining <= 0) {
-        window.clearInterval(timerId);
-        return;
-      }
-
-      const step = Math.max(1, Math.min(3, Math.ceil(remaining / 36)));
-      charIndex = Math.min(terminalTargetText.length, charIndex + step);
-      setTerminalText(terminalTargetText.slice(0, charIndex));
-
-      if (charIndex >= terminalTargetText.length) {
-        window.clearInterval(timerId);
-      }
-    }, TERMINAL_TYPE_INTERVAL_MS);
-
-    return () => {
-      window.clearInterval(timerId);
-    };
-  }, [selectedNodeId, terminalTargetText]);
-
-  useEffect(() => {
-    const terminalNode = terminalScrollRef.current;
-    if (!terminalNode) return;
-    terminalNode.scrollTop = terminalNode.scrollHeight;
-  }, [terminalText]);
 
   useEffect(() => {
     const stageNode = stageRef.current;
@@ -796,6 +298,7 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
       rotationY: 0.42,
       velocityX: 0,
       velocityY: 0,
+      edgeDashOffset: 0,
       activePointerId: null,
       isDragging: false,
       dragDistanceSq: 0,
@@ -987,14 +490,20 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
         if (!source || !target) continue;
 
         const avgDepth = (source.depth + target.depth) * 0.5;
+        const dashSize = 3.5 + avgDepth * 2.4;
+        const gapSize = 6 + (1 - avgDepth) * 2.2;
 
         context.beginPath();
+        context.setLineDash([dashSize, gapSize]);
+        context.lineDashOffset = -(engine.edgeDashOffset + avgDepth * 8);
         context.moveTo(source.x, source.y);
         context.lineTo(target.x, target.y);
         context.strokeStyle = `rgba(255, 255, 255, ${0.08 + avgDepth * 0.2})`;
         context.lineWidth = 0.75 + avgDepth * 0.9;
         context.stroke();
       }
+      context.setLineDash([]);
+      context.lineDashOffset = 0;
 
       const sortedNodes = [...engine.nodes].sort((left, right) => left.z - right.z);
       for (const node of sortedNodes) {
@@ -1058,6 +567,7 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
         if (Math.abs(engine.velocityX) < 0.000004) engine.velocityX = 0;
         if (Math.abs(engine.velocityY) < 0.000004) engine.velocityY = 0;
       }
+      engine.edgeDashOffset += 0.18;
 
       draw();
       engine.rafId = window.requestAnimationFrame(animate);
@@ -1109,19 +619,11 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
 
   const resolvedCount = graphData.nodes.length;
   const isTerminalOpen = Boolean(selectedNodeId);
-  const canStartCall = Boolean(
-    avatarsEnabled && selectedNodeId && selectedMappedAgent && !hasActiveCall
-  );
 
-  const handleStartCall = () => {
-    if (!selectedNodeId || !selectedMappedAgent) return;
-    const context = String(avatarContextOverride || "").trim();
-    setActiveCall({
-      nodeId: selectedNodeId,
-      contextOverride: context,
-      nonce: Date.now()
-    });
-  };
+  const simRunning = simulationStatus?.state === "running";
+  const simDone = simulationStatus?.state === "done";
+  const simDay = simulationStatus?.day || 0;
+  const simBarFill = simRunning ? Math.round((simDay / 5) * 100) : simDone ? 100 : 0;
 
   return (
     <div className={`graph-circle-canvas ${isTerminalOpen ? "terminal-open" : ""}`}>
@@ -1131,78 +633,111 @@ function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
         ) : null}
         <canvas ref={canvasRef} className="graph-circle-canvas-element" />
       </div>
+
+      {(simRunning || simDone) && (
+        <div className={`sim-status-bar ${simDone ? "done" : ""}`}>
+          <div className="sim-status-bar-track">
+            <div className="sim-status-bar-fill" style={{ width: `${simBarFill}%` }} />
+          </div>
+          <span className="sim-status-label">
+            {simRunning
+              ? `Simulating… Day ${simDay + 1} / 5`
+              : "Simulation complete"}
+          </span>
+        </div>
+      )}
+
+      <div className="graph-panel-fab-stack" aria-label="Graph actions">
+        <button
+          type="button"
+          className={`graph-panel-fab ${!simDone ? "sim-locked" : ""}`}
+          aria-label="Call"
+          disabled={!simDone}
+          title={!simDone ? "Available after simulation completes" : "Call"}
+        >
+          <img src={callIcon} alt="" />
+        </button>
+        <button
+          type="button"
+          className={`graph-panel-fab ${!simDone ? "sim-locked" : ""}`}
+          aria-label="View Simulation Journey"
+          disabled={!simDone || !(simulationData && simulationData[selectedNodeId])}
+          onClick={
+            simDone && simulationData && simulationData[selectedNodeId]
+              ? () => setJourneyModalOpen(true)
+              : undefined
+          }
+          title={
+            !simDone
+              ? "Available after simulation completes"
+              : simulationData && simulationData[selectedNodeId]
+              ? "View Simulation Journey"
+              : "No simulation data for this agent"
+          }
+        >
+          <img src={notesIcon} alt="" />
+        </button>
+      </div>
+
       <div
         className={`graph-node-terminal ${isTerminalOpen ? "open" : ""}`}
         aria-hidden={!isTerminalOpen}
       >
-        <div className="graph-node-terminal-scroll" ref={terminalScrollRef}>
-          {avatarsEnabled ? (
-            <div className="graph-node-avatar">
-              <div className="graph-node-avatar-top">
-                <div className="graph-node-avatar-media">
-                  {selectedLiveVideoEnabled ? (
-                    <div ref={videoSinkRef} className="graph-node-avatar-video-sink" />
-                  ) : selectedPortraitUrl ? (
-                    <img
-                      key={selectedPortraitUrl}
-                      src={selectedPortraitUrl}
-                      alt={`Portrait of ${selectedNodeId}`}
-                      className="graph-node-portrait-image"
-                      loading="lazy"
-                    />
-                  ) : null}
+        <div className="graph-node-terminal-scroll">
+          <div className="graph-node-terminal-profile">
+            <p className="graph-node-terminal-name">{selectedNode?.label || selectedNodeId}</p>
+            <div className="graph-node-terminal-grid">
+              {detailColumns.map((column, columnIndex) => (
+                <div className="graph-node-terminal-column" key={`detail-column-${columnIndex}`}>
+                  {column.map((detailRow, rowIndex) => (
+                    <div
+                      className="graph-node-terminal-row"
+                      key={`detail-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
+                    >
+                      <span className="graph-node-terminal-key">{detailRow.label}</span>
+                      <span className="graph-node-terminal-value" title={detailRow.value}>
+                        {detailRow.value}
+                      </span>
+                    </div>
+                  ))}
                 </div>
-                <div className="graph-node-avatar-actions" aria-label="Graph actions">
-                  <button
-                    type="button"
-                    className="graph-panel-fab"
-                    aria-label="Call"
-                    onClick={handleStartCall}
-                    disabled={!canStartCall}
-                    title={
-                      canStartCall
-                        ? "Start call"
-                        : "Select a mapped node to call"
-                    }
-                  >
-                    <img src={callIcon} alt="" />
-                  </button>
-                  <button type="button" className="graph-panel-fab" aria-label="Notes">
-                    <img src={notesIcon} alt="" />
-                  </button>
-                </div>
-              </div>
-              <div ref={audioSinkRef} />
-              <p className="graph-node-avatar-status">{avatarStatus}</p>
-              {needsAudioUnlock ? (
-                <button type="button" className="graph-node-audio-unlock" onClick={unlockAudioPlayback}>
-                  Enable Voice
-                </button>
-              ) : null}
-              {avatarError ? <p className="graph-node-avatar-error">{avatarError}</p> : null}
+              ))}
             </div>
-          ) : null}
-          <pre className="graph-node-terminal-text">
-            {isSummaryPending ? (
-              <>
-                {`$ Loading profile summary... ${TERMINAL_SPINNER_FRAMES[spinnerFrameIndex]}`}
-                <span className="graph-node-terminal-caret" aria-hidden="true">
-                  ▋
-                </span>
-              </>
-            ) : (
-              <>
-                {terminalText}
-                {isTerminalOpen && terminalText.length < terminalTargetText.length ? (
-                  <span className="graph-node-terminal-caret" aria-hidden="true">
-                    ▋
-                  </span>
-                ) : null}
-              </>
-            )}
-          </pre>
+            {simDone && !(simulationData && simulationData[selectedNodeId]) ? (
+              <p className="sim-no-data">No simulation data for this agent.</p>
+            ) : null}
+          </div>
         </div>
       </div>
+
+      {journeyModalOpen && simulationData && simulationData[selectedNodeId] && (
+        <div
+          className="sim-journey-modal-overlay"
+          onClick={() => setJourneyModalOpen(false)}
+        >
+          <div
+            className="sim-journey-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sim-journey-modal-header">
+              <span className="sim-journey-modal-title">
+                {selectedNode?.label || selectedNodeId}
+              </span>
+              <button
+                type="button"
+                className="sim-journey-modal-close"
+                onClick={() => setJourneyModalOpen(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="sim-journey-modal-scroll">
+              <SimulationJourney data={simulationData[selectedNodeId]} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
