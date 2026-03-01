@@ -947,11 +947,14 @@ function parseWordNumberToken(input) {
 function extractRequestedSampleCountFromPrompt(promptText) {
   const text = String(promptText || "");
   if (!text) return null;
+  const sampleNounPattern =
+    "(?:representatives?|agents?|samples?|residents?|citizens?|people|persons?|individuals?|voters?|households?|respondents?|personas?|profiles?)";
 
   const numericPatterns = [
     /\bn\s*=\s*([\d,]{1,9})\b/i,
-    /\bwith\s+([\d,]{1,9})\s+(?:representatives?|agents?|samples?)\b/i,
-    /\b([\d,]{1,9})\s+(?:representatives?|agents?|samples?)\b/i
+    new RegExp(`\\bwith\\s+([\\d,]{1,9})\\s+${sampleNounPattern}\\b`, "i"),
+    new RegExp(`\\b([\\d,]{1,9})\\s+${sampleNounPattern}\\b`, "i"),
+    /\bsimulat(?:e|ion)\b[\s\S]{0,120}?\bwith\s+([\d,]{1,9})\b/i
   ];
 
   for (const pattern of numericPatterns) {
@@ -964,8 +967,9 @@ function extractRequestedSampleCountFromPrompt(promptText) {
   }
 
   const wordPatterns = [
-    /\bwith\s+([a-z]+(?:[-\s][a-z]+){0,3})\s+(?:representatives?|agents?|samples?)\b/i,
-    /\b([a-z]+(?:[-\s][a-z]+){0,3})\s+(?:representatives?|agents?|samples?)\b/i
+    new RegExp(`\\bwith\\s+([a-z]+(?:[-\\s][a-z]+){0,3})\\s+${sampleNounPattern}\\b`, "i"),
+    new RegExp(`\\b([a-z]+(?:[-\\s][a-z]+){0,3})\\s+${sampleNounPattern}\\b`, "i"),
+    /\bsimulat(?:e|ion)\b[\s\S]{0,120}?\bwith\s+([a-z]+(?:[-\s][a-z]+){0,3})\b/i
   ];
 
   for (const pattern of wordPatterns) {
@@ -978,6 +982,87 @@ function extractRequestedSampleCountFromPrompt(promptText) {
   }
 
   return null;
+}
+
+function parseCountToken(token) {
+  const normalized = String(token || "").trim();
+  if (!normalized) return null;
+  const numeric = Number.parseInt(normalized.replaceAll(",", ""), 10);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  return parseWordNumberToken(normalized);
+}
+
+function inferEditTargetSampleCount(currentCsvPayload, changeRequest) {
+  const currentCount = parseCsvRecords(currentCsvPayload).rows.length;
+  const text = String(changeRequest || "").trim();
+  if (!text) return currentCount > 0 ? currentCount : null;
+  const sampleNounPattern =
+    "(?:representatives?|agents?|samples?|residents?|citizens?|people|persons?|individuals?|voters?|households?|respondents?|personas?|profiles?)";
+
+  const absolutePatterns = [
+    new RegExp(
+      `\\b(?:set|make|update|change|do|use|keep|have)\\s+(?:it\\s+)?(?:to|at)?\\s*([a-z0-9,\\s-]{1,40})\\s+${sampleNounPattern}\\b`,
+      "i"
+    ),
+    new RegExp(
+      `\\b(?:total(?:\\s+of)?|exactly|at)\\s+([a-z0-9,\\s-]{1,40})\\s+${sampleNounPattern}\\b`,
+      "i"
+    )
+  ];
+
+  for (const pattern of absolutePatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const parsed = parseCountToken(match[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  const directRequestedCount = extractRequestedSampleCountFromPrompt(text);
+  if (Number.isFinite(directRequestedCount) && directRequestedCount > 0) {
+    const relativeVerbPattern = /\b(add|increase|expand|append|include|generate|remove|delete|drop|reduce|decrease|cut)\b/i;
+    const relativeQualifierPattern = /\b(more|fewer|less)\b/i;
+    if (!relativeVerbPattern.test(text) && !relativeQualifierPattern.test(text)) {
+      return directRequestedCount;
+    }
+  }
+
+  const addPatterns = [
+    new RegExp(
+      `\\b(?:add|increase|expand|append|include|generate)\\s+([a-z0-9,\\s-]{1,40})\\s+(?:more\\s+)?${sampleNounPattern}\\b`,
+      "i"
+    ),
+    new RegExp(`\\b([a-z0-9,\\s-]{1,40})\\s+more\\s+${sampleNounPattern}\\b`, "i")
+  ];
+  for (const pattern of addPatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const parsed = parseCountToken(match[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, currentCount + parsed);
+    }
+  }
+
+  const removePatterns = [
+    new RegExp(
+      `\\b(?:remove|delete|drop|reduce|decrease|cut)\\s+([a-z0-9,\\s-]{1,40})\\s+${sampleNounPattern}\\b`,
+      "i"
+    ),
+    new RegExp(`\\b([a-z0-9,\\s-]{1,40})\\s+fewer\\s+${sampleNounPattern}\\b`, "i"),
+    /\bless\s+by\s+([a-z0-9,\s-]{1,40})\b/i
+  ];
+  for (const pattern of removePatterns) {
+    const match = text.match(pattern);
+    if (!match?.[1]) continue;
+    const parsed = parseCountToken(match[1]);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, currentCount - parsed);
+    }
+  }
+
+  // Fallback for vague edit prompts: keep previous total as expected target.
+  return currentCount > 0 ? currentCount : null;
 }
 
 function downloadCsvArtifact(csvPayload, runId = "") {
@@ -1018,9 +1103,11 @@ function CsvArtifactCard({
   const generatedCount = Number.isFinite(summary?.rowCount) ? Math.max(0, summary.rowCount) : 0;
   const displayTotalCount = resolvedTotalCount
     ? Math.max(resolvedTotalCount, generatedCount)
-    : generatedCount > 0
-      ? generatedCount
-      : null;
+    : pending
+      ? null
+      : generatedCount > 0
+        ? generatedCount
+        : null;
   const progressLabel = `${generatedCount}/${displayTotalCount ?? "?"} samples generated`;
   const isInteractive = typeof onOpen === "function";
   const canDownload = typeof onDownload === "function";
@@ -2513,7 +2600,11 @@ function App() {
     }
   };
 
-  const runEditQuery = async (currentCsvPayload, changeRequest, assistantTurnId) => {
+  const runEditQuery = async (
+    currentCsvPayload,
+    changeRequest,
+    assistantTurnId
+  ) => {
     const plannerEndpoint = plannerChatEndpointFor(PLANNER_MODEL_ENDPOINT);
     const plannerRequestUrl = USE_PLANNER_DEV_PROXY ? PLANNER_DEV_PROXY_PATH : plannerEndpoint;
     if (!plannerRequestUrl) throw new Error("Planner endpoint is not configured.");
@@ -2607,13 +2698,24 @@ function App() {
       } else {
         const assistantPendingTurnId = createRuntimeId("assistant");
         const { csvPayload: currentCsv } = editState;
+        const editThinkingPlaceholder = pickThinkingPlaceholder();
+        const requestedSampleCount = inferEditTargetSampleCount(currentCsv, promptText);
         setEditState(null);
         setScenarioText("");
         setIsSubmitting(true);
         setChatMessages((prev) => [
           ...prev,
           userTurn,
-          { id: assistantPendingTurnId, role: "assistant", content: THINKING_PLACEHOLDER_TEXT, pending: true, startedAtMs: Date.now() }
+          {
+            id: assistantPendingTurnId,
+            role: "assistant",
+            content: editThinkingPlaceholder,
+            pending: true,
+            uiType: "thinking-placeholder",
+            thinkingPlaceholder: editThinkingPlaceholder,
+            startedAtMs: Date.now(),
+            requestedSampleCount
+          }
         ]);
         window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
 
