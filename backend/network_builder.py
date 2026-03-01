@@ -51,6 +51,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.error
@@ -207,6 +208,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_portraits_refresh_lock = threading.Lock()
 
 
 def _load_planner_system_prompt() -> str:
@@ -875,6 +878,15 @@ def _refresh_agent_portraits(agents_csv_path: Path) -> Path:
     return output_index_path
 
 
+def _refresh_agent_portraits_background(agents_csv_path: Path) -> None:
+    with _portraits_refresh_lock:
+        try:
+            generated_path = _refresh_agent_portraits(agents_csv_path)
+            print(f"[INFO] Portrait generation finished: {generated_path}")
+        except Exception as exc:  # pragma: no cover - defensive background guard
+            print(f"[WARN] Portrait generation failed in background: {exc}")
+
+
 def build_social_graph(csv_text: str, directed: bool = False) -> GraphBuildResponse:
     _fieldnames, rows = _parse_csv_rows(csv_text)
 
@@ -1094,7 +1106,7 @@ async def planner_context_stream(
 
 @app.post("/api/agents/generated-csv", response_model=SaveGeneratedCsvResponse)
 async def save_generated_agents_csv(payload: SaveGeneratedCsvRequest) -> SaveGeneratedCsvResponse:
-    portraits_index_path: Path | None = None
+    portraits_index_path: Path | None = _portraits_index_path()
     try:
         output_path, row_count = _write_generated_agents_csv(payload.csv_text)
         mapping_path = _refresh_agent_avatar_mapping(output_path)
@@ -1102,10 +1114,13 @@ async def save_generated_agents_csv(payload: SaveGeneratedCsvRequest) -> SaveGen
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to write CSV file: {exc}") from exc
-    try:
-        portraits_index_path = _refresh_agent_portraits(output_path)
-    except ValueError as exc:
-        print(f"[WARN] Portrait generation skipped: {exc}")
+
+    portraits_thread = threading.Thread(
+        target=_refresh_agent_portraits_background,
+        args=(output_path,),
+        daemon=True,
+    )
+    portraits_thread.start()
 
     return SaveGeneratedCsvResponse(
         saved_path=str(output_path),

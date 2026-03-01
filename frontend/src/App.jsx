@@ -3162,13 +3162,19 @@ function App() {
         setEditState(null);
         setScenarioText("");
         setIsSubmitting(true);
+        setChatMessages((prev) => [
+          ...prev,
+          userTurn
+        ]);
+        if (shouldAutoScrollRef.current) {
+          window.requestAnimationFrame(() => scrollChatToBottom("smooth", true));
+        }
         const csvPrepPromise = prepareCsvForSimulation(currentCsv);
         const simulationStart = await handleRunSimulation(simulationGraph);
         const csvPrep = await csvPrepPromise;
         scenarioTextRef.current = "";
         setChatMessages((prev) => [
           ...prev,
-          userTurn,
           {
             id: createRuntimeId("assistant"),
             role: "assistant",

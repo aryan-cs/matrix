@@ -1,0 +1,41 @@
+{
+  "TX-001": {
+    "live_video_enabled": false,
+    "live_avatar_enabled": false,
+    "avatar_id": "5c6e2257-bb91-48f4-a75d-d4c9ad212af9",
+    "avatar_name": "Rika in Blue Suit (Portrait)",
+    "default_voice_id": "b2bd6569-a537-4342-aeca-a1f15d2a2c97",
+    "default_voice_name": "Rika - IA",
+    "confidence": 0.45,
+    "reason": "Voice assigned. Live video disabled because no unassigned strict match; using generated photo.",
+    "agent_gender": "female",
+    "agent_age_bucket": "35-44",
+    "agent_ethnicity": "other"
+  },
+  "TX-002": {
+    "live_video_enabled": true,
+    "live_avatar_enabled": true,
+    "avatar_id": "0930fd59-c8ad-434d-ad53-b391a1768720",
+    "avatar_name": "Dexter Lawyer",
+    "default_voice_id": "b952f553-f7f3-4e52-8625-86b4c415384f",
+    "default_voice_name": "Dexter - Professional",
+    "confidence": 0.85,
+    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
+    "agent_gender": "male",
+    "agent_age_bucket": "55-64",
+    "agent_ethnicity": "white"
+  },
+  "TX-003": {
+    "live_video_enabled": false,
+    "live_avatar_enabled": false,
+    "avatar_id": "5c6e2257-bb91-48f4-a75d-d4c9ad212af9",
+    "avatar_name": "Rika in Blue Suit (Portrait)",
+    "default_voice_id": "b2bd6569-a537-4342-aeca-a1f15d2a2c97",
+    "default_voice_name": "Rika - IA",
+    "confidence": 0.45,
+    "reason": "Voice assigned. Live video disabled because no unassigned strict match; using generated photo.",
+    "agent_gender": "female",
+    "agent_age_bucket": "35-44",
+    "agent_ethnicity": "other"
+  }
+}
