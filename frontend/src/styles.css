@@ -120,10 +120,6 @@ input {
   will-change: transform;
 }
 
-.graph-circle-canvas.terminal-open .graph-circle-stage {
-  transform: translateY(-108px);
-}
-
 .graph-circle-empty {
   position: absolute;
   top: 50%;
@@ -143,10 +139,10 @@ input {
   width: 100%;
   height: 100%;
   display: block;
-  cursor: grab;
+  cursor: pointer;
 }
 
-.graph-circle-canvas-element:active {
+.graph-circle-canvas-element.dragging {
   cursor: grabbing;
 }
 
@@ -158,17 +154,6 @@ input {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  transform: translateX(calc(100% + 22px));
-  pointer-events: none;
-  transition:
-    bottom 720ms var(--ease-slingshot),
-    transform 720ms var(--ease-slingshot);
-  will-change: bottom, transform;
-}
-
-.graph-circle-canvas.terminal-open .graph-panel-fab-stack {
-  bottom: 212px;
-  transform: translateX(0);
   pointer-events: auto;
 }
 
@@ -214,60 +199,75 @@ input {
   pointer-events: none;
 }
 
-.graph-node-terminal {
+.graph-node-tooltip {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 4;
-  min-height: 150px;
-  max-height: 46%;
-  padding: 10px 12px;
-  display: flex;
-  align-items: stretch;
-  pointer-events: auto;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(0, 0, 0, 0.92);
-  backdrop-filter: blur(2px);
-  transform: translateY(102%);
+  z-index: 8;
+  max-width: min(340px, calc(100% - 24px));
+  max-height: min(44%, 290px);
+  min-width: min(180px, calc(100% - 24px));
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(8, 8, 8, 0.62);
+  backdrop-filter: blur(10px) saturate(115%);
+  -webkit-backdrop-filter: blur(10px) saturate(115%);
+  box-shadow:
+    0 14px 38px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03);
   opacity: 0;
   pointer-events: none;
-  transition:
-    transform 720ms var(--ease-slingshot),
-    opacity 260ms var(--ease-soft);
-  will-change: transform, opacity;
-}
-
-.graph-node-terminal.open {
-  transform: translateY(0);
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.graph-node-terminal-scroll {
-  width: 100%;
   overflow: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
+  transform: translate3d(0, 8px, 0) scale(0.985);
+  transition: opacity 260ms var(--ease-soft), transform 260ms var(--ease-soft);
+  will-change: opacity, transform;
 }
 
-.graph-node-terminal-scroll::-webkit-scrollbar {
+.graph-node-tooltip::-webkit-scrollbar {
   width: 0;
   height: 0;
   display: none;
 }
 
+.graph-node-tooltip.open {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.graph-node-hover-tooltip.suppressed {
+  opacity: 0;
+  transform: translate3d(0, 10px, 0) scale(0.985);
+}
+
+.graph-node-selected-tooltip {
+  left: 50%;
+  right: auto;
+  top: auto;
+  bottom: 14px;
+  width: min(340px, calc(100% - 24px));
+  max-height: min(42%, 280px);
+  opacity: 1;
+  transform: translate3d(-50%, calc(100% + 52px), 0) scale(0.975);
+  transition: transform 640ms var(--ease-slingshot);
+  will-change: transform;
+}
+
+.graph-node-selected-tooltip.open {
+  transform: translate3d(-50%, 0, 0) scale(1);
+}
+
 .graph-node-terminal-profile {
   min-width: 0;
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .graph-node-terminal-name {
   margin: 0;
   min-width: 0;
   color: rgba(242, 242, 242, 0.95);
-  font-size: 0.98rem;
+  font-size: 0.9rem;
   line-height: 1.2;
   font-weight: 700;
   white-space: nowrap;
@@ -279,34 +279,27 @@ input {
   min-width: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 18px;
+  gap: 6px 12px;
 }
 
 .graph-node-terminal-column {
   min-width: 0;
   display: grid;
-  gap: 6px;
+  gap: 4px;
 }
 
 .graph-node-terminal-row {
   min-width: 0;
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
+  display: block;
   align-items: baseline;
-  gap: 8px;
   color: rgba(225, 225, 225, 0.94);
-  font-size: 0.75rem;
-  line-height: 1.35;
+  font-size: 0.66rem;
+  line-height: 1.25;
   font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
-.graph-node-terminal-key {
-  color: rgba(195, 195, 195, 0.9);
-  white-space: nowrap;
-}
-
 .graph-node-terminal-value {
-  min-width: 0;
+  display: block;
   color: rgba(236, 236, 236, 0.94);
   white-space: nowrap;
   overflow: hidden;
@@ -366,12 +359,20 @@ input {
   background: rgba(120, 255, 160, 0.72);
 }
 
+.sim-status-bar.error .sim-status-bar-fill {
+  background: rgba(255, 130, 130, 0.72);
+}
+
 .sim-status-label {
   font-size: 0.7rem;
   font-weight: 500;
   color: rgba(255, 255, 255, 0.55);
   white-space: nowrap;
   letter-spacing: 0.03em;
+}
+
+.sim-status-bar.error .sim-status-label {
+  color: rgba(255, 160, 160, 0.86);
 }
 
 /* ── View Journey button (inside terminal) ── */
@@ -1195,7 +1196,7 @@ input {
 }
 
 .chat-meta-think {
-  margin-left: 12px;
+  margin-left: 18px;
   color: var(--muted-strong);
   font-style: italic;
   opacity: 0.86;
@@ -1227,7 +1228,7 @@ input {
 }
 
 .chat-assistant-think-wrap {
-  margin-left: 14px;
+  margin-left: 12px;
 }
 
 .chat-assistant-think-details {
@@ -1249,6 +1250,11 @@ input {
   color: rgba(191, 191, 191, 0.78);
   font-style: italic;
   line-height: inherit;
+}
+
+.chat-assistant-think-summary.static {
+  cursor: default;
+  pointer-events: none;
 }
 
 .chat-assistant-think-caret {
@@ -2164,6 +2170,14 @@ input {
 .artifact-content {
   padding: 0 22px 22px;
   overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.artifact-content::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 @keyframes artifact-backdrop-in {
@@ -2212,6 +2226,14 @@ input {
   border-radius: 12px;
   padding: 10px;
   background: rgba(255, 255, 255, 0.02);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.artifact-table-wrap::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .artifact-table {

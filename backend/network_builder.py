@@ -1,19 +1,47 @@
 from __future__ import annotations
 
 from pathlib import Path
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+import os
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+except ImportError:
+    _load_dotenv = None
+
+
+def _load_repo_env_file() -> None:
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if _load_dotenv is not None:
+        _load_dotenv(env_path)
+        return
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+_load_repo_env_file()
 
 import asyncio
 import csv
 import io
 import json
-import os
 import re
 import urllib.parse
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
@@ -411,8 +439,8 @@ def _liveavatar_request(
     method: str,
     path: str,
     *,
-    payload: dict[str, Any] | None = None,
-    session_token: str | None = None,
+    payload: Optional[dict[str, Any]] = None,
+    session_token: Optional[str] = None,
 ) -> dict[str, Any]:
     base_url = _liveavatar_base_url()
     api_key = _liveavatar_api_key()
@@ -892,7 +920,7 @@ async def _call_sim_agent(
             return f"[{agent_id} unavailable: {exc}]"
 
 
-async def _run_simulation_task(graph_data: dict | None = None) -> None:
+async def _run_simulation_task(graph_data: Optional[dict] = None) -> None:
     """Background task: run the full 5-day simulation."""
     global _sim_status, _sim_results
 
@@ -993,12 +1021,12 @@ async def _run_simulation_task(graph_data: dict | None = None) -> None:
 
 
 class SimulationRunRequest(BaseModel):
-    nodes: list[dict] | None = None
-    edges: list[dict] | None = None
+    nodes: Optional[list[dict]] = None
+    edges: Optional[list[dict]] = None
 
 
 @app.post("/api/simulation/run")
-async def simulation_run(background_tasks: BackgroundTasks, body: SimulationRunRequest | None = None):
+async def simulation_run(background_tasks: BackgroundTasks, body: Optional[SimulationRunRequest] = None):
     global _sim_status, _sim_results
     if _sim_status["state"] == "running":
         return {"status": "already_running"}

@@ -228,11 +228,28 @@ function SimulationJourney({ data }) {
 
 function GraphCirclePanel({ graph = null, simulationData = null, simulationStatus = null }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [hoveredNodeId, setHoveredNodeId] = useState("");
+  const [hoverPointer, setHoverPointer] = useState({ x: 0, y: 0 });
+  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
+  const [hoverTooltipSnapshot, setHoverTooltipSnapshot] = useState({
+    id: "",
+    name: "",
+    columns: [[], []]
+  });
+  const [selectedTooltipSnapshot, setSelectedTooltipSnapshot] = useState({
+    name: "",
+    columns: [[], []]
+  });
+  const [isCanvasDraggingCursor, setIsCanvasDraggingCursor] = useState(false);
   const [journeyModalOpen, setJourneyModalOpen] = useState(false);
   const selectedNodeIdRef = useRef("");
+  const hoveredNodeIdRef = useRef("");
+  const hoverPointerRef = useRef({ x: 0, y: 0 });
+  const dragCursorActiveRef = useRef(false);
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
+  const tooltipRef = useRef(null);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -257,11 +274,24 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
     () => buildNodeDetailRows(selectedNode, nodeById, adjacencyById),
     [selectedNode, nodeById, adjacencyById]
   );
-  const detailColumns = useMemo(() => {
+  const selectedDetailColumns = useMemo(() => {
     if (selectedNodeDetails.length === 0) return [[], []];
     const midpoint = Math.ceil(selectedNodeDetails.length / 2);
     return [selectedNodeDetails.slice(0, midpoint), selectedNodeDetails.slice(midpoint)];
   }, [selectedNodeDetails]);
+  const hoveredNode = useMemo(
+    () => (hoveredNodeId ? nodeById.get(hoveredNodeId) || null : null),
+    [hoveredNodeId, nodeById]
+  );
+  const hoveredNodeDetails = useMemo(
+    () => buildNodeDetailRows(hoveredNode, nodeById, adjacencyById),
+    [hoveredNode, nodeById, adjacencyById]
+  );
+  const hoveredDetailColumns = useMemo(() => {
+    if (hoveredNodeDetails.length === 0) return [[], []];
+    const midpoint = Math.ceil(hoveredNodeDetails.length / 2);
+    return [hoveredNodeDetails.slice(0, midpoint), hoveredNodeDetails.slice(midpoint)];
+  }, [hoveredNodeDetails]);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -269,10 +299,61 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
   }, [selectedNodeId]);
 
   useEffect(() => {
+    if (!selectedNode) return;
+    setSelectedTooltipSnapshot({
+      name: selectedNode.label || selectedNode.id,
+      columns: selectedDetailColumns
+    });
+  }, [selectedNode, selectedDetailColumns]);
+
+  useEffect(() => {
+    hoveredNodeIdRef.current = hoveredNodeId;
+  }, [hoveredNodeId]);
+
+  useEffect(() => {
+    if (!hoveredNode || !hoveredNodeId) return;
+    setHoverTooltipSnapshot({
+      id: hoveredNodeId,
+      name: hoveredNode.label || hoveredNodeId,
+      columns: hoveredDetailColumns
+    });
+  }, [hoveredNode, hoveredNodeId, hoveredDetailColumns]);
+
+  useEffect(() => {
     if (selectedNodeId && !nodeById.has(selectedNodeId)) {
       setSelectedNodeId("");
     }
   }, [selectedNodeId, nodeById]);
+
+  useEffect(() => {
+    if (hoveredNodeId && !nodeById.has(hoveredNodeId)) {
+      setHoveredNodeId("");
+    }
+  }, [hoveredNodeId, nodeById]);
+
+  useEffect(() => {
+    if (!hoveredNodeId) return;
+    const stageNode = stageRef.current;
+    const tooltipNode = tooltipRef.current;
+    if (!stageNode || !tooltipNode) return;
+
+    const stageWidth = Math.max(1, stageNode.clientWidth);
+    const stageHeight = Math.max(1, stageNode.clientHeight);
+    const tooltipWidth = Math.max(1, tooltipNode.offsetWidth);
+    const tooltipHeight = Math.max(1, tooltipNode.offsetHeight);
+    const gapX = 18;
+    const gapY = 14;
+
+    const x = hoverPointer.x + gapX;
+    const y = hoverPointer.y + gapY;
+
+    const clampedX = clamp(x, 10, Math.max(10, stageWidth - tooltipWidth - 10));
+    const clampedY = clamp(y, 10, Math.max(10, stageHeight - tooltipHeight - 10));
+    setTooltipPosition((prev) => {
+      if (Math.abs(prev.x - clampedX) < 0.5 && Math.abs(prev.y - clampedY) < 0.5) return prev;
+      return { x: clampedX, y: clampedY };
+    });
+  }, [hoveredNodeId, hoverPointer]);
 
   useEffect(() => {
     const stageNode = stageRef.current;
@@ -407,6 +488,27 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       };
     };
 
+    const updateHoverState = (pointer) => {
+      const hitIndex = pickNodeAt(pointer.x, pointer.y);
+      const nextHoverId = hitIndex === -1 ? "" : engine.nodes[hitIndex].id;
+
+      if (hoveredNodeIdRef.current !== nextHoverId) {
+        hoveredNodeIdRef.current = nextHoverId;
+        setHoveredNodeId(nextHoverId);
+      }
+
+      if (!nextHoverId) return;
+
+      const previousPointer = hoverPointerRef.current;
+      if (
+        Math.abs(previousPointer.x - pointer.x) > 1.5 ||
+        Math.abs(previousPointer.y - pointer.y) > 1.5
+      ) {
+        hoverPointerRef.current = pointer;
+        setHoverPointer(pointer);
+      }
+    };
+
     const onPointerDown = (event) => {
       const pointer = pointerPositionFor(event);
       engine.activePointerId = event.pointerId;
@@ -417,17 +519,32 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       engine.velocityX = 0;
       engine.velocityY = 0;
       canvasNode.setPointerCapture(event.pointerId);
+      hoveredNodeIdRef.current = "";
+      setHoveredNodeId("");
+      if (dragCursorActiveRef.current) {
+        dragCursorActiveRef.current = false;
+      }
+      setIsCanvasDraggingCursor(false);
     };
 
     const onPointerMove = (event) => {
-      if (!engine.isDragging || event.pointerId !== engine.activePointerId) return;
       const pointer = pointerPositionFor(event);
+
+      if (!engine.isDragging) {
+        updateHoverState(pointer);
+        return;
+      }
+      if (event.pointerId !== engine.activePointerId) return;
       const dx = pointer.x - engine.lastPointerX;
       const dy = pointer.y - engine.lastPointerY;
 
       engine.dragDistanceSq += dx * dx + dy * dy;
       engine.lastPointerX = pointer.x;
       engine.lastPointerY = pointer.y;
+      if (!dragCursorActiveRef.current && (Math.abs(dx) > 0.15 || Math.abs(dy) > 0.15)) {
+        dragCursorActiveRef.current = true;
+        setIsCanvasDraggingCursor(true);
+      }
 
       engine.rotationY += dx * 0.0057;
       engine.rotationX -= dy * 0.0052;
@@ -444,6 +561,10 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       }
       engine.isDragging = false;
       engine.activePointerId = null;
+      if (dragCursorActiveRef.current) {
+        dragCursorActiveRef.current = false;
+      }
+      setIsCanvasDraggingCursor(false);
 
       if (engine.dragDistanceSq <= 18) {
         const pointer = pointerPositionFor(event);
@@ -453,7 +574,17 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
         } else {
           setSelectedNodeId(engine.nodes[hitIndex].id);
         }
+        updateHoverState(pointer);
       }
+    };
+
+    const onPointerLeave = () => {
+      hoveredNodeIdRef.current = "";
+      setHoveredNodeId("");
+      if (dragCursorActiveRef.current) {
+        dragCursorActiveRef.current = false;
+      }
+      setIsCanvasDraggingCursor(false);
     };
 
     const onWheel = (event) => {
@@ -506,10 +637,16 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       context.lineDashOffset = 0;
 
       const sortedNodes = [...engine.nodes].sort((left, right) => left.z - right.z);
+      const activeSelectedNodeId = selectedNodeIdRef.current;
+      const hasSelectedNode = Boolean(activeSelectedNodeId);
       for (const node of sortedNodes) {
-        const isSelected = node.id === selectedNodeIdRef.current;
+        const isSelected = node.id === activeSelectedNodeId;
+        const isDimmedBySelection = hasSelectedNode && !isSelected;
         const visualRadius = node.radius * (0.74 + node.depth * 0.56) + (isSelected ? 1.4 : 0);
-        const nodeShade = Math.round(86 + node.depth * 169);
+        const depthShade = Math.round(86 + node.depth * 169);
+        const nodeShade = isDimmedBySelection
+          ? Math.max(36, Math.round(depthShade * 0.36))
+          : depthShade;
 
         context.beginPath();
         context.arc(node.x, node.y, visualRadius, 0, Math.PI * 2);
@@ -547,11 +684,19 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
           context.font = `500 ${nameFontSize}px "Google Sans", sans-serif`;
           context.textAlign = labelAlign;
           context.textBaseline = "alphabetic";
-          context.fillStyle = `rgba(255, 255, 255, ${(0.42 + node.depth * 0.3) * labelVisibility})`;
+          if (isDimmedBySelection) {
+            context.fillStyle = `rgba(148, 148, 148, ${(0.22 + node.depth * 0.12) * labelVisibility})`;
+          } else {
+            context.fillStyle = `rgba(255, 255, 255, ${(0.42 + node.depth * 0.3) * labelVisibility})`;
+          }
           context.fillText(node.label || node.id, labelX, nameY);
 
           context.font = `500 ${idFontSize}px "Google Sans Code", "Google Sans", ui-monospace, monospace`;
-          context.fillStyle = `rgba(190, 190, 190, ${(0.4 + node.depth * 0.28) * labelVisibility})`;
+          if (isDimmedBySelection) {
+            context.fillStyle = `rgba(122, 122, 122, ${(0.2 + node.depth * 0.1) * labelVisibility})`;
+          } else {
+            context.fillStyle = `rgba(190, 190, 190, ${(0.4 + node.depth * 0.28) * labelVisibility})`;
+          }
           context.fillText(node.id, labelX, idY);
         }
       }
@@ -599,6 +744,7 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
     canvasNode.addEventListener("pointermove", onPointerMove);
     canvasNode.addEventListener("pointerup", onPointerUp);
     canvasNode.addEventListener("pointercancel", onPointerUp);
+    canvasNode.addEventListener("pointerleave", onPointerLeave);
     canvasNode.addEventListener("wheel", onWheel, { passive: false });
 
     animate();
@@ -609,6 +755,7 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       canvasNode.removeEventListener("pointermove", onPointerMove);
       canvasNode.removeEventListener("pointerup", onPointerUp);
       canvasNode.removeEventListener("pointercancel", onPointerUp);
+      canvasNode.removeEventListener("pointerleave", onPointerLeave);
       canvasNode.removeEventListener("wheel", onWheel);
       window.cancelAnimationFrame(engine.rafId);
       if (resizeRafId) {
@@ -618,95 +765,143 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
   }, [graphData]);
 
   const resolvedCount = graphData.nodes.length;
-  const isTerminalOpen = Boolean(selectedNodeId);
-
   const simRunning = simulationStatus?.state === "running";
   const simDone = simulationStatus?.state === "done";
+  const simError = simulationStatus?.state === "error";
   const simDay = simulationStatus?.day || 0;
   const simBarFill = simRunning ? Math.round((simDay / 5) * 100) : simDone ? 100 : 0;
+  const showGraphActionButtons = simDone && Boolean(selectedNodeId);
+  const showHoverTooltip = Boolean(hoveredNodeId && hoveredNode);
+  const showSelectedTooltip = Boolean(selectedNodeId && selectedNode);
+  const hoverTooltipName = showHoverTooltip
+    ? hoveredNode?.label || hoveredNodeId
+    : hoverTooltipSnapshot.name;
+  const hoverTooltipColumns = showHoverTooltip ? hoveredDetailColumns : hoverTooltipSnapshot.columns;
+  const hoverTooltipNodeId = showHoverTooltip ? hoveredNodeId : hoverTooltipSnapshot.id;
 
   return (
-    <div className={`graph-circle-canvas ${isTerminalOpen ? "terminal-open" : ""}`}>
+    <div className="graph-circle-canvas">
       <div className="graph-circle-stage" ref={stageRef}>
         {resolvedCount === 0 ? (
           <p className="graph-circle-empty">No valid network graph data found in generated CSV.</p>
         ) : null}
-        <canvas ref={canvasRef} className="graph-circle-canvas-element" />
+        <canvas
+          ref={canvasRef}
+          className={`graph-circle-canvas-element ${isCanvasDraggingCursor ? "dragging" : ""}`}
+        />
       </div>
 
-      {(simRunning || simDone) && (
-        <div className={`sim-status-bar ${simDone ? "done" : ""}`}>
+      {(simRunning || simDone || simError) && (
+        <div className={`sim-status-bar ${simDone ? "done" : ""} ${simError ? "error" : ""}`}>
           <div className="sim-status-bar-track">
             <div className="sim-status-bar-fill" style={{ width: `${simBarFill}%` }} />
           </div>
           <span className="sim-status-label">
             {simRunning
               ? `Simulating… Day ${simDay + 1} / 5`
-              : "Simulation complete"}
+              : simDone
+                ? "Simulation complete"
+                : `Simulation failed${simulationStatus?.error ? `: ${simulationStatus.error}` : ""}`}
           </span>
         </div>
       )}
 
-      <div className="graph-panel-fab-stack" aria-label="Graph actions">
-        <button
-          type="button"
-          className={`graph-panel-fab ${!simDone ? "sim-locked" : ""}`}
-          aria-label="Call"
-          disabled={!simDone}
-          title={!simDone ? "Available after simulation completes" : "Call"}
-        >
-          <img src={callIcon} alt="" />
-        </button>
-        <button
-          type="button"
-          className={`graph-panel-fab ${!simDone ? "sim-locked" : ""}`}
-          aria-label="View Simulation Journey"
-          disabled={!simDone || !(simulationData && simulationData[selectedNodeId])}
-          onClick={
-            simDone && simulationData && simulationData[selectedNodeId]
-              ? () => setJourneyModalOpen(true)
-              : undefined
-          }
-          title={
-            !simDone
-              ? "Available after simulation completes"
-              : simulationData && simulationData[selectedNodeId]
-              ? "View Simulation Journey"
-              : "No simulation data for this agent"
-          }
-        >
-          <img src={notesIcon} alt="" />
-        </button>
+      {showGraphActionButtons ? (
+        <div className="graph-panel-fab-stack" aria-label="Graph actions">
+          <button
+            type="button"
+            className="graph-panel-fab"
+            aria-label="Call"
+            title="Call"
+          >
+            <img src={callIcon} alt="" />
+          </button>
+          <button
+            type="button"
+            className="graph-panel-fab"
+            aria-label="View Simulation Journey"
+            disabled={!(simulationData && simulationData[selectedNodeId])}
+            onClick={
+              simulationData && simulationData[selectedNodeId]
+                ? () => setJourneyModalOpen(true)
+                : undefined
+            }
+            title={
+              simulationData && simulationData[selectedNodeId]
+                ? "View Simulation Journey"
+                : "No simulation data for this agent"
+            }
+          >
+            <img src={notesIcon} alt="" />
+          </button>
+        </div>
+      ) : null}
+
+      <div
+        ref={tooltipRef}
+        className={`graph-node-tooltip graph-node-hover-tooltip ${showHoverTooltip ? "open" : ""} ${
+          showSelectedTooltip ? "suppressed" : ""
+        }`}
+        style={{
+          left: `${tooltipPosition.x}px`,
+          top: `${tooltipPosition.y}px`
+        }}
+        aria-hidden={!showHoverTooltip}
+      >
+        <div className="graph-node-terminal-profile">
+          <p className="graph-node-terminal-name">{hoverTooltipName}</p>
+          <div className="graph-node-terminal-grid">
+            {hoverTooltipColumns.map((column, columnIndex) => (
+              <div className="graph-node-terminal-column" key={`hover-detail-column-${columnIndex}`}>
+                {column.map((detailRow, rowIndex) => (
+                  <div
+                    className="graph-node-terminal-row"
+                    key={`hover-detail-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
+                  >
+                    <span className="graph-node-terminal-value" title={detailRow.value}>
+                      {detailRow.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          {simDone && hoverTooltipNodeId && !(simulationData && simulationData[hoverTooltipNodeId]) ? (
+            <p className="sim-no-data">No simulation data for this agent.</p>
+          ) : null}
+        </div>
       </div>
 
       <div
-        className={`graph-node-terminal ${isTerminalOpen ? "open" : ""}`}
-        aria-hidden={!isTerminalOpen}
+        className={`graph-node-tooltip graph-node-selected-tooltip ${
+          showSelectedTooltip ? "open" : ""
+        }`}
+        aria-hidden={!showSelectedTooltip}
       >
-        <div className="graph-node-terminal-scroll">
-          <div className="graph-node-terminal-profile">
-            <p className="graph-node-terminal-name">{selectedNode?.label || selectedNodeId}</p>
-            <div className="graph-node-terminal-grid">
-              {detailColumns.map((column, columnIndex) => (
-                <div className="graph-node-terminal-column" key={`detail-column-${columnIndex}`}>
-                  {column.map((detailRow, rowIndex) => (
-                    <div
-                      className="graph-node-terminal-row"
-                      key={`detail-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
-                    >
-                      <span className="graph-node-terminal-key">{detailRow.label}</span>
-                      <span className="graph-node-terminal-value" title={detailRow.value}>
-                        {detailRow.value}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-            {simDone && !(simulationData && simulationData[selectedNodeId]) ? (
-              <p className="sim-no-data">No simulation data for this agent.</p>
-            ) : null}
+        <div className="graph-node-terminal-profile">
+          <p className="graph-node-terminal-name">{selectedTooltipSnapshot.name}</p>
+          <div className="graph-node-terminal-grid">
+            {selectedTooltipSnapshot.columns.map((column, columnIndex) => (
+              <div
+                className="graph-node-terminal-column"
+                key={`selected-detail-column-${columnIndex}`}
+              >
+                {column.map((detailRow, rowIndex) => (
+                  <div
+                    className="graph-node-terminal-row"
+                    key={`selected-detail-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
+                  >
+                    <span className="graph-node-terminal-value" title={detailRow.value}>
+                      {detailRow.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
+          {simDone && selectedNodeId && !(simulationData && simulationData[selectedNodeId]) ? (
+            <p className="sim-no-data">No simulation data for this agent.</p>
+          ) : null}
         </div>
       </div>
 

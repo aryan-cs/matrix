@@ -1112,17 +1112,6 @@ function CsvArtifactCard({
   onDownload = null,
   downloadQueued = false
 }) {
-  const resolvedTotalCount =
-    Number.isFinite(totalCount) && totalCount > 0 ? Math.max(1, Math.round(totalCount)) : null;
-  const generatedCount = Number.isFinite(summary?.rowCount) ? Math.max(0, summary.rowCount) : 0;
-  const displayTotalCount = resolvedTotalCount
-    ? Math.max(resolvedTotalCount, generatedCount)
-    : pending
-      ? null
-      : generatedCount > 0
-        ? generatedCount
-        : null;
-  const progressLabel = `${generatedCount}/${displayTotalCount ?? "?"} samples generated`;
   const isInteractive = typeof onOpen === "function";
   const canDownload = typeof onDownload === "function";
   const downloadLabel = pending
@@ -1147,7 +1136,6 @@ function CsvArtifactCard({
         <div className="csv-artifact-badge">CSV</div>
         <div className="csv-artifact-copy">
           <p className="csv-artifact-title">Generated Agent Data</p>
-          <p className="csv-artifact-meta">{progressLabel}</p>
         </div>
       </button>
       <button
@@ -1254,8 +1242,8 @@ function thoughtDurationLabel(durationSeconds) {
   return `Thought for ${Math.round(durationSeconds)} seconds.`;
 }
 
-function ThinkDisclosure({ id, label, children }) {
-  const [isOpen, setIsOpen] = useState(false);
+function ThinkDisclosure({ id, label, children, defaultOpen = false }) {
+  const [isOpen, setIsOpen] = useState(Boolean(defaultOpen));
 
   return (
     <div className={`chat-assistant-think-details ${isOpen ? "open" : ""}`}>
@@ -1271,6 +1259,17 @@ function ThinkDisclosure({ id, label, children }) {
       </button>
       <div className="chat-assistant-think-panel" id={`${id}-think-panel`} aria-hidden={!isOpen}>
         <div className="chat-assistant-think-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function ThinkingStatusRow({ label }) {
+  return (
+    <div className="chat-meta-think chat-assistant-think-wrap">
+      <div className="chat-assistant-think-summary static" role="status" aria-live="polite">
+        <img className="chat-assistant-think-caret" src={dropdownIcon} alt="" />
+        <span>{label}</span>
       </div>
     </div>
   );
@@ -1347,9 +1346,7 @@ function renderMessageContent(message, options = {}) {
     return (
       <>
         {exaMetaBlock}
-        <div className="chat-meta-think">
-          <p className="chat-thinking-placeholder">{thinkingPlaceholderText}</p>
-        </div>
+        <ThinkingStatusRow label={thinkingPlaceholderText} />
       </>
     );
   }
@@ -1372,22 +1369,6 @@ function renderMessageContent(message, options = {}) {
     Number.isFinite(message.requestedSampleCount) && message.requestedSampleCount > 0
       ? message.requestedSampleCount
       : null;
-  const shouldHoldPendingThinkingStyle =
-    Boolean(message.pending) &&
-    (hasThinkText || isThinkingPlaceholderMessage(message)) &&
-    !hasAnswerText;
-
-  if (shouldHoldPendingThinkingStyle) {
-    return (
-      <>
-        {exaMetaBlock}
-        <div className="chat-meta-think">
-          <p className="chat-thinking-placeholder">{thinkingPlaceholderText}</p>
-        </div>
-      </>
-    );
-  }
-
   if (!hasThinkText) {
     if (showCsvArtifact) {
       return (
@@ -1431,7 +1412,7 @@ function renderMessageContent(message, options = {}) {
     <>
       {exaMetaBlock}
       <div className="chat-meta-think chat-assistant-think-wrap">
-        <ThinkDisclosure id={message.id} label={thinkLabel}>
+        <ThinkDisclosure id={message.id} label={thinkLabel} defaultOpen={Boolean(message.pending)}>
           {renderMarkdownContent(thinkText, `${message.id}-think`)}
         </ThinkDisclosure>
       </div>
@@ -1492,7 +1473,7 @@ function messageHasThinkSection(message) {
 
   const messageText = String(message.content || "");
   if (isThinkingPlaceholderMessage(message)) {
-    return false;
+    return true;
   }
 
   const treatUnclosedAsThinking = Boolean(message.pending) || /<think\s*>/i.test(messageText);
@@ -2340,20 +2321,53 @@ function App() {
     };
   }, []);
 
-  const handleRunSimulation = async () => {
-    if (simulationStatus?.state === "running") return;
+  const handleRunSimulation = async (graphOverride = null) => {
+    if (simulationStatus?.state === "running") {
+      return { started: false, error: "Simulation is already running." };
+    }
+
+    const graphPayload =
+      graphOverride && Array.isArray(graphOverride.nodes) && graphOverride.nodes.length > 0
+        ? graphOverride
+        : graphPanelGraph;
+
+    if (!graphPayload || !Array.isArray(graphPayload.nodes) || graphPayload.nodes.length === 0) {
+      const errorText = "No graph data available to start simulation.";
+      setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: errorText });
+      return { started: false, error: errorText };
+    }
+
     setSimulationData(null);
     setSimulationStatus({ state: "running", progress: 0, total: 0, day: 0 });
+
     try {
-      await fetch("/api/simulation/run", {
+      const startResponse = await fetch("/api/simulation/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(graphPanelGraph || {}),
+        body: JSON.stringify({
+          nodes: graphPayload.nodes,
+          edges: Array.isArray(graphPayload.edges) ? graphPayload.edges : []
+        }),
       });
-    } catch {
-      setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: "Network error" });
-      return;
+
+      let startBody = null;
+      try {
+        startBody = await startResponse.json();
+      } catch {
+        startBody = null;
+      }
+
+      if (!startResponse.ok) {
+        const detail =
+          startBody?.detail || startBody?.error || `API returned ${startResponse.status}.`;
+        throw new Error(String(detail));
+      }
+    } catch (error) {
+      const errorText = error?.message || "Network error";
+      setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: errorText });
+      return { started: false, error: errorText };
     }
+
     if (simulationPollRef.current) clearInterval(simulationPollRef.current);
     simulationPollRef.current = setInterval(async () => {
       try {
@@ -2371,6 +2385,8 @@ function App() {
         }
       } catch { /* keep polling */ }
     }, 2000);
+
+    return { started: true, error: "" };
   };
 
   useEffect(() => {
@@ -3112,15 +3128,26 @@ function App() {
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
       const noChangesPattern = /^(no|no changes?|looks? good|proceed|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah)\b/i;
       if (noChangesPattern.test(promptText.trim())) {
+        const { csvPayload: currentCsv } = editState;
+        const simulationGraph = buildNetworkGraphFromCsv(currentCsv) || graphPanelGraph;
       setEditState(null);
       setScenarioText("");
+        setIsSubmitting(true);
+        const simulationStart = await handleRunSimulation(simulationGraph);
       scenarioTextRef.current = "";
       setChatMessages((prev) => [
           ...prev,
           userTurn,
-          { id: createRuntimeId("assistant"), role: "assistant", content: "Simulation started! Your agents are now active in the Matrix." }
+          {
+            id: createRuntimeId("assistant"),
+            role: "assistant",
+            content: simulationStart.started
+              ? "Simulation started. Welcome to the desert of the real."
+              : `Couldn't start simulation:\n${simulationStart.error || "Unknown error."}`,
+            uiType: "status-tooltip"
+          }
         ]);
-        handleRunSimulation();
+        setIsSubmitting(false);
         return;
       }
 
