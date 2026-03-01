@@ -1,10 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Room, RoomEvent, Track } from "livekit-client";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import callIcon from "../../assets/icons/call.svg";
 import notesIcon from "../../assets/icons/notes.svg";
-
-const AVATAR_AGENTS_ENDPOINT = "/api/avatar/agents";
-const AVATAR_START_ENDPOINT = "/api/avatar/session/start";
 
 function clampNodeRadius(count) {
   if (count <= 12) return 18;
@@ -30,7 +26,20 @@ const DETAIL_FIELDS = [
 
 function formatDetailValue(value) {
   const normalized = String(value ?? "").trim();
-  return normalized || "—";
+  if (!normalized) return "";
+  const lowered = normalized.toLowerCase();
+  if (
+    normalized === "-" ||
+    normalized === "—" ||
+    lowered === "n/a" ||
+    lowered === "na" ||
+    lowered === "none" ||
+    lowered === "null" ||
+    lowered === "undefined"
+  ) {
+    return "";
+  }
+  return normalized;
 }
 
 function buildNodeDetailRows(selectedNode, nodeById, adjacencyById) {
@@ -57,17 +66,21 @@ function buildNodeDetailRows(selectedNode, nodeById, adjacencyById) {
 
   const detailRows = [{ key: "agent_id", label: "Agent ID", value: selectedNode.id }];
   for (const [key, label] of DETAIL_FIELDS) {
+    const formattedValue = formatDetailValue(metadata[key]);
+    if (!formattedValue) continue;
     detailRows.push({
       key,
       label,
-      value: formatDetailValue(metadata[key])
+      value: formattedValue
     });
   }
-  detailRows.push({
-    key: "connected_nodes",
-    label: "Connected Nodes",
-    value: connectionNames.length > 0 ? connectionNames.join(", ") : "—"
-  });
+  if (connectionNames.length > 0) {
+    detailRows.push({
+      key: "connected_nodes",
+      label: "Connected Nodes",
+      value: connectionNames.join(", ")
+    });
+  }
 
   return detailRows;
 }
@@ -174,70 +187,6 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function buildAvatarContext(selectedNode, simulationEntry) {
-  const metadata =
-    selectedNode?.metadata && typeof selectedNode.metadata === "object"
-      ? selectedNode.metadata
-      : {};
-  const lines = [];
-  const name = selectedNode?.label || metadata.full_name || selectedNode?.id || "Unknown";
-  const agentId = selectedNode?.id || "";
-
-  lines.push(`You are ${name} (${agentId}). Stay fully in character at all times.`);
-  lines.push("These beliefs, experiences, and social ties are your own lived reality.");
-  lines.push("Speak in first person as this person, not as an analyst or narrator.");
-
-  const details = [
-    ["Age", metadata.age],
-    ["Gender", metadata.gender],
-    ["Ethnicity", metadata.ethnicity],
-    ["Political Lean", metadata.political_lean],
-    ["Education", metadata.education],
-    ["Occupation", metadata.occupation],
-    ["Location", metadata.home_address]
-  ]
-    .filter(([, value]) => String(value ?? "").trim())
-    .map(([label, value]) => `${label}: ${String(value).trim()}`);
-  if (details.length > 0) {
-    lines.push("");
-    lines.push("Profile:");
-    lines.push(...details);
-  }
-
-  if (simulationEntry) {
-    lines.push("");
-    lines.push("Simulation timeline:");
-    if (simulationEntry.initial) {
-      lines.push(`Day 0 (Initial): ${simulationEntry.initial}`);
-    }
-    if (Array.isArray(simulationEntry.days)) {
-      for (const day of simulationEntry.days) {
-        const dayIndex = Number(day?.day);
-        const dayLabel = Number.isFinite(dayIndex) ? `Day ${dayIndex + 1}` : "Day";
-        const talkedTo = Array.isArray(day?.talked_to) ? day.talked_to.filter(Boolean) : [];
-        if (talkedTo.length > 0) {
-          lines.push(`${dayLabel} talked to: ${talkedTo.join(", ")}`);
-        }
-        if (day?.content) {
-          lines.push(`${dayLabel} summary: ${day.content}`);
-        }
-      }
-    }
-    if (simulationEntry.final) {
-      lines.push(`Final position: ${simulationEntry.final}`);
-    }
-  }
-
-  lines.push("");
-  lines.push("Conversation rules:");
-  lines.push("- Never say you are an AI, assistant, model, or that you are roleplaying.");
-  lines.push("- Never refer to 'the simulation', 'the provided context', or 'the report'.");
-  lines.push("- Express values, concerns, and decisions as your own personal views.");
-  lines.push("- Keep tone natural and human; use concrete details from your life and relationships when relevant.");
-  lines.push("- Respond conversationally in 2-4 sentences unless asked for detail.");
-  return lines.join("\n");
-}
-
 function SimulationJourney({ data }) {
   if (!data || !data.days || data.days.length === 0) return null;
   const [expandedDay, setExpandedDay] = useState(-1);
@@ -296,22 +245,32 @@ function SimulationJourney({ data }) {
 
 function GraphCirclePanel({ graph = null, simulationData = null, simulationStatus = null }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [hoveredNodeId, setHoveredNodeId] = useState("");
+  const [hoverPointer, setHoverPointer] = useState({ x: 0, y: 0 });
+  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
+  const [hoverTooltipSnapshot, setHoverTooltipSnapshot] = useState({
+    id: "",
+    name: "",
+    columns: [[], []]
+  });
+  const [selectedTooltipSnapshot, setSelectedTooltipSnapshot] = useState({
+    name: "",
+    columns: [[], []]
+  });
+  const [panelWidthPx, setPanelWidthPx] = useState(0);
+  const [selectedTooltipWidthPx, setSelectedTooltipWidthPx] = useState(0);
+  const [isCanvasDraggingCursor, setIsCanvasDraggingCursor] = useState(false);
   const [journeyModalOpen, setJourneyModalOpen] = useState(false);
-  const [avatarAgents, setAvatarAgents] = useState([]);
-  const [callCardOpen, setCallCardOpen] = useState(false);
-  const [activeCallAgentId, setActiveCallAgentId] = useState("");
-  const [callStatus, setCallStatus] = useState("");
-  const [callError, setCallError] = useState("");
-  const [isStartingCall, setIsStartingCall] = useState(false);
-  const [useVideoFeed, setUseVideoFeed] = useState(false);
-  const [portraitFailed, setPortraitFailed] = useState(false);
   const selectedNodeIdRef = useRef("");
+  const hoveredNodeIdRef = useRef("");
+  const hoverPointerRef = useRef({ x: 0, y: 0 });
+  const dragCursorActiveRef = useRef(false);
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
-  const roomRef = useRef(null);
-  const videoHostRef = useRef(null);
-  const audioHostRef = useRef(null);
+  const tooltipRef = useRef(null);
+  const selectedTooltipMeasureRef = useRef(null);
+  const activeTalkEdgesRef = useRef([]);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -336,60 +295,40 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
     () => buildNodeDetailRows(selectedNode, nodeById, adjacencyById),
     [selectedNode, nodeById, adjacencyById]
   );
-  const detailColumns = useMemo(() => {
+  const selectedDetailColumns = useMemo(() => {
     if (selectedNodeDetails.length === 0) return [[], []];
     const midpoint = Math.ceil(selectedNodeDetails.length / 2);
     return [selectedNodeDetails.slice(0, midpoint), selectedNodeDetails.slice(midpoint)];
   }, [selectedNodeDetails]);
-  const avatarAgentById = useMemo(
-    () => new Map((Array.isArray(avatarAgents) ? avatarAgents : []).map((agent) => [agent.agent_id, agent])),
-    [avatarAgents]
+  const hoveredNode = useMemo(
+    () => (hoveredNodeId ? nodeById.get(hoveredNodeId) || null : null),
+    [hoveredNodeId, nodeById]
   );
-  const selectedSimulation = selectedNodeId ? simulationData?.[selectedNodeId] ?? null : null;
-  const selectedAvatarAgent = selectedNodeId ? avatarAgentById.get(selectedNodeId) ?? null : null;
-  const activePortraitSrc = activeCallAgentId ? `/api/portrait/${encodeURIComponent(activeCallAgentId)}` : "";
-  const loadAvatarAgents = useCallback(async () => {
-    try {
-      const response = await fetch(AVATAR_AGENTS_ENDPOINT);
-      if (!response.ok) {
-        setAvatarAgents([]);
-        return;
-      }
-      const payload = await response.json();
-      setAvatarAgents(Array.isArray(payload?.agents) ? payload.agents : []);
-    } catch {
-      setAvatarAgents([]);
+  const hoveredNodeDetails = useMemo(
+    () => buildNodeDetailRows(hoveredNode, nodeById, adjacencyById),
+    [hoveredNode, nodeById, adjacencyById]
+  );
+  const hoveredDetailColumns = useMemo(() => {
+    if (hoveredNodeDetails.length === 0) return [[], []];
+    const midpoint = Math.ceil(hoveredNodeDetails.length / 2);
+    return [hoveredNodeDetails.slice(0, midpoint), hoveredNodeDetails.slice(midpoint)];
+  }, [hoveredNodeDetails]);
+  const activeTalkEdges = useMemo(() => {
+    if (simulationStatus?.state !== "running") return [];
+    const rawEdges = Array.isArray(simulationStatus?.talk_edges) ? simulationStatus.talk_edges : [];
+    const normalized = [];
+    const seen = new Set();
+    for (const edge of rawEdges) {
+      const fromId = String(edge?.from ?? edge?.source ?? edge?.speaker ?? "").trim();
+      const toId = String(edge?.to ?? edge?.target ?? edge?.listener ?? "").trim();
+      if (!fromId || !toId || fromId === toId) continue;
+      const key = `${fromId}::${toId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      normalized.push({ from: fromId, to: toId });
     }
-  }, []);
-
-  const clearMediaHosts = () => {
-    const videoHost = videoHostRef.current;
-    if (videoHost) {
-      while (videoHost.firstChild) {
-        videoHost.removeChild(videoHost.firstChild);
-      }
-    }
-    const audioHost = audioHostRef.current;
-    if (audioHost) {
-      while (audioHost.firstChild) {
-        audioHost.removeChild(audioHost.firstChild);
-      }
-    }
-  };
-
-  const disconnectCall = () => {
-    const room = roomRef.current;
-    if (room) {
-      room.disconnect();
-      roomRef.current = null;
-    }
-    clearMediaHosts();
-    setCallCardOpen(false);
-    setActiveCallAgentId("");
-    setCallStatus("");
-    setCallError("");
-    setPortraitFailed(false);
-  };
+    return normalized;
+  }, [simulationStatus]);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -397,11 +336,29 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
   }, [selectedNodeId]);
 
   useEffect(() => {
-    // Only one active call at a time: changing to a different node closes the current call.
-    if (!activeCallAgentId || !selectedNodeId) return;
-    if (selectedNodeId === activeCallAgentId) return;
-    disconnectCall();
-  }, [selectedNodeId, activeCallAgentId]);
+    if (!selectedNode) return;
+    setSelectedTooltipSnapshot({
+      name: selectedNode.label || selectedNode.id,
+      columns: selectedDetailColumns
+    });
+  }, [selectedNode, selectedDetailColumns]);
+
+  useEffect(() => {
+    hoveredNodeIdRef.current = hoveredNodeId;
+  }, [hoveredNodeId]);
+
+  useEffect(() => {
+    if (!hoveredNode || !hoveredNodeId) return;
+    setHoverTooltipSnapshot({
+      id: hoveredNodeId,
+      name: hoveredNode.label || hoveredNodeId,
+      columns: hoveredDetailColumns
+    });
+  }, [hoveredNode, hoveredNodeId, hoveredDetailColumns]);
+
+  useEffect(() => {
+    activeTalkEdgesRef.current = activeTalkEdges;
+  }, [activeTalkEdges]);
 
   useEffect(() => {
     if (selectedNodeId && !nodeById.has(selectedNodeId)) {
@@ -410,15 +367,68 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
   }, [selectedNodeId, nodeById]);
 
   useEffect(() => {
-    void loadAvatarAgents();
-  }, [loadAvatarAgents]);
+    if (hoveredNodeId && !nodeById.has(hoveredNodeId)) {
+      setHoveredNodeId("");
+    }
+  }, [hoveredNodeId, nodeById]);
 
   useEffect(() => {
-    if (simulationStatus?.state !== "done") return;
-    void loadAvatarAgents();
-  }, [simulationStatus?.state, graphData.nodes.length, loadAvatarAgents]);
+    if (!hoveredNodeId) return;
+    const stageNode = stageRef.current;
+    const tooltipNode = tooltipRef.current;
+    if (!stageNode || !tooltipNode) return;
 
-  useEffect(() => () => disconnectCall(), []);
+    const stageWidth = Math.max(1, stageNode.clientWidth);
+    const stageHeight = Math.max(1, stageNode.clientHeight);
+    const tooltipWidth = Math.max(1, tooltipNode.offsetWidth);
+    const tooltipHeight = Math.max(1, tooltipNode.offsetHeight);
+    const gapX = 18;
+    const gapY = 14;
+
+    const x = hoverPointer.x + gapX;
+    const y = hoverPointer.y + gapY;
+
+    const clampedX = clamp(x, 10, Math.max(10, stageWidth - tooltipWidth - 10));
+    const clampedY = clamp(y, 10, Math.max(10, stageHeight - tooltipHeight - 10));
+    setTooltipPosition((prev) => {
+      if (Math.abs(prev.x - clampedX) < 0.5 && Math.abs(prev.y - clampedY) < 0.5) return prev;
+      return { x: clampedX, y: clampedY };
+    });
+  }, [hoveredNodeId, hoverPointer]);
+
+  useEffect(() => {
+    const stageNode = stageRef.current;
+    if (!stageNode) return undefined;
+
+    const syncPanelWidth = () => {
+      const nextWidth = Math.max(0, Math.floor(stageNode.clientWidth));
+      setPanelWidthPx((prev) => (prev === nextWidth ? prev : nextWidth));
+    };
+
+    syncPanelWidth();
+
+    const resizeObserver = new ResizeObserver(() => {
+      syncPanelWidth();
+    });
+    resizeObserver.observe(stageNode);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const stageNode = stageRef.current;
+    const measureNode = selectedTooltipMeasureRef.current;
+    if (!stageNode || !measureNode) return;
+
+    const availableWidth = Math.max(180, Math.floor(stageNode.clientWidth));
+    const measuredWidth = Math.ceil(measureNode.scrollWidth);
+    if (!Number.isFinite(measuredWidth) || measuredWidth <= 0) return;
+
+    const nextWidth = Math.max(180, Math.min(availableWidth, measuredWidth));
+    setSelectedTooltipWidthPx((prev) => (Math.abs(prev - nextWidth) < 1 ? prev : nextWidth));
+  }, [selectedTooltipSnapshot, panelWidthPx]);
 
   useEffect(() => {
     const stageNode = stageRef.current;
@@ -440,11 +450,13 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       zoomScale: zoomScaleRef.current,
       nodes: [],
       edges: graphData.edges,
+      idToIndex: new Map(graphData.nodes.map((node, index) => [node.id, index])),
       rotationX: -0.34,
       rotationY: 0.42,
       velocityX: 0,
       velocityY: 0,
       edgeDashOffset: 0,
+      pulsePhase: 0,
       activePointerId: null,
       isDragging: false,
       dragDistanceSq: 0,
@@ -553,6 +565,27 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       };
     };
 
+    const updateHoverState = (pointer) => {
+      const hitIndex = pickNodeAt(pointer.x, pointer.y);
+      const nextHoverId = hitIndex === -1 ? "" : engine.nodes[hitIndex].id;
+
+      if (hoveredNodeIdRef.current !== nextHoverId) {
+        hoveredNodeIdRef.current = nextHoverId;
+        setHoveredNodeId(nextHoverId);
+      }
+
+      if (!nextHoverId) return;
+
+      const previousPointer = hoverPointerRef.current;
+      if (
+        Math.abs(previousPointer.x - pointer.x) > 1.5 ||
+        Math.abs(previousPointer.y - pointer.y) > 1.5
+      ) {
+        hoverPointerRef.current = pointer;
+        setHoverPointer(pointer);
+      }
+    };
+
     const onPointerDown = (event) => {
       const pointer = pointerPositionFor(event);
       engine.activePointerId = event.pointerId;
@@ -563,17 +596,32 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       engine.velocityX = 0;
       engine.velocityY = 0;
       canvasNode.setPointerCapture(event.pointerId);
+      hoveredNodeIdRef.current = "";
+      setHoveredNodeId("");
+      if (dragCursorActiveRef.current) {
+        dragCursorActiveRef.current = false;
+      }
+      setIsCanvasDraggingCursor(false);
     };
 
     const onPointerMove = (event) => {
-      if (!engine.isDragging || event.pointerId !== engine.activePointerId) return;
       const pointer = pointerPositionFor(event);
+
+      if (!engine.isDragging) {
+        updateHoverState(pointer);
+        return;
+      }
+      if (event.pointerId !== engine.activePointerId) return;
       const dx = pointer.x - engine.lastPointerX;
       const dy = pointer.y - engine.lastPointerY;
 
       engine.dragDistanceSq += dx * dx + dy * dy;
       engine.lastPointerX = pointer.x;
       engine.lastPointerY = pointer.y;
+      if (!dragCursorActiveRef.current && (Math.abs(dx) > 0.15 || Math.abs(dy) > 0.15)) {
+        dragCursorActiveRef.current = true;
+        setIsCanvasDraggingCursor(true);
+      }
 
       engine.rotationY += dx * 0.0057;
       engine.rotationX -= dy * 0.0052;
@@ -590,6 +638,10 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       }
       engine.isDragging = false;
       engine.activePointerId = null;
+      if (dragCursorActiveRef.current) {
+        dragCursorActiveRef.current = false;
+      }
+      setIsCanvasDraggingCursor(false);
 
       if (engine.dragDistanceSq <= 18) {
         const pointer = pointerPositionFor(event);
@@ -599,7 +651,17 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
         } else {
           setSelectedNodeId(engine.nodes[hitIndex].id);
         }
+        updateHoverState(pointer);
       }
+    };
+
+    const onPointerLeave = () => {
+      hoveredNodeIdRef.current = "";
+      setHoveredNodeId("");
+      if (dragCursorActiveRef.current) {
+        dragCursorActiveRef.current = false;
+      }
+      setIsCanvasDraggingCursor(false);
     };
 
     const onWheel = (event) => {
@@ -651,11 +713,73 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       context.setLineDash([]);
       context.lineDashOffset = 0;
 
+      const activeTalkEdges = activeTalkEdgesRef.current;
+      if (activeTalkEdges.length > 0) {
+        context.setLineDash([]);
+        context.lineDashOffset = 0;
+        context.lineCap = "round";
+
+        for (let i = 0; i < activeTalkEdges.length; i += 1) {
+          const talkEdge = activeTalkEdges[i];
+          const sourceIndex = engine.idToIndex.get(talkEdge.from);
+          const targetIndex = engine.idToIndex.get(talkEdge.to);
+          if (sourceIndex === undefined || targetIndex === undefined) continue;
+
+          const source = engine.nodes[sourceIndex];
+          const target = engine.nodes[targetIndex];
+          if (!source || !target) continue;
+
+          const dx = target.x - source.x;
+          const dy = target.y - source.y;
+          const distance = Math.hypot(dx, dy);
+          if (distance < 3) continue;
+
+          const avgDepth = (source.depth + target.depth) * 0.5;
+          const edgeWidth = 0.75 + avgDepth * 0.9;
+          const pulseLengthPx = Math.min(Math.max(16, distance * 0.18), 46);
+          const pulseLengthT = Math.min(0.7, pulseLengthPx / distance);
+          const headT = (engine.pulsePhase + i * 0.19) % 1;
+          const tailT = Math.max(0, headT - pulseLengthT);
+          const startX = source.x + dx * tailT;
+          const startY = source.y + dy * tailT;
+          const endX = source.x + dx * headT;
+          const endY = source.y + dy * headT;
+
+          const gradient = context.createLinearGradient(startX, startY, endX, endY);
+          const midAlpha = Math.min(0.86, 0.45 + avgDepth * 0.3);
+          gradient.addColorStop(0, "rgba(255, 255, 255, 0.05)");
+          gradient.addColorStop(0.72, `rgba(255, 255, 255, ${midAlpha.toFixed(3)})`);
+          gradient.addColorStop(1, "rgba(255, 255, 255, 0.98)");
+
+          context.beginPath();
+          context.moveTo(startX, startY);
+          context.lineTo(endX, endY);
+          context.strokeStyle = gradient;
+          context.lineWidth = edgeWidth;
+          context.stroke();
+
+          context.beginPath();
+          context.arc(endX, endY, Math.max(1.2, edgeWidth * 0.7), 0, Math.PI * 2);
+          context.fillStyle = "rgba(255, 255, 255, 0.98)";
+          context.fill();
+        }
+
+        context.lineCap = "butt";
+      }
+
       const sortedNodes = [...engine.nodes].sort((left, right) => left.z - right.z);
+      const activeSelectedNodeId = selectedNodeIdRef.current;
+      const hasSelectedNode = Boolean(activeSelectedNodeId);
       for (const node of sortedNodes) {
-        const isSelected = node.id === selectedNodeIdRef.current;
+        const isSelected = node.id === activeSelectedNodeId;
+        const isDimmedBySelection = hasSelectedNode && !isSelected;
         const visualRadius = node.radius * (0.74 + node.depth * 0.56) + (isSelected ? 1.4 : 0);
-        const nodeShade = Math.round(86 + node.depth * 169);
+        const depthShade = Math.round(86 + node.depth * 169);
+        const nodeShade = isSelected
+          ? 255
+          : isDimmedBySelection
+            ? Math.max(36, Math.round(depthShade * 0.36))
+            : depthShade;
 
         context.beginPath();
         context.arc(node.x, node.y, visualRadius, 0, Math.PI * 2);
@@ -693,11 +817,19 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
           context.font = `500 ${nameFontSize}px "Google Sans", sans-serif`;
           context.textAlign = labelAlign;
           context.textBaseline = "alphabetic";
-          context.fillStyle = `rgba(255, 255, 255, ${(0.42 + node.depth * 0.3) * labelVisibility})`;
+          if (isDimmedBySelection) {
+            context.fillStyle = `rgba(148, 148, 148, ${(0.22 + node.depth * 0.12) * labelVisibility})`;
+          } else {
+            context.fillStyle = `rgba(255, 255, 255, ${(0.42 + node.depth * 0.3) * labelVisibility})`;
+          }
           context.fillText(node.label || node.id, labelX, nameY);
 
           context.font = `500 ${idFontSize}px "Google Sans Code", "Google Sans", ui-monospace, monospace`;
-          context.fillStyle = `rgba(190, 190, 190, ${(0.4 + node.depth * 0.28) * labelVisibility})`;
+          if (isDimmedBySelection) {
+            context.fillStyle = `rgba(122, 122, 122, ${(0.2 + node.depth * 0.1) * labelVisibility})`;
+          } else {
+            context.fillStyle = `rgba(190, 190, 190, ${(0.4 + node.depth * 0.28) * labelVisibility})`;
+          }
           context.fillText(node.id, labelX, idY);
         }
       }
@@ -714,6 +846,7 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
         if (Math.abs(engine.velocityY) < 0.000004) engine.velocityY = 0;
       }
       engine.edgeDashOffset += 0.18;
+      engine.pulsePhase = (engine.pulsePhase + 0.012) % 1;
 
       draw();
       engine.rafId = window.requestAnimationFrame(animate);
@@ -745,6 +878,7 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
     canvasNode.addEventListener("pointermove", onPointerMove);
     canvasNode.addEventListener("pointerup", onPointerUp);
     canvasNode.addEventListener("pointercancel", onPointerUp);
+    canvasNode.addEventListener("pointerleave", onPointerLeave);
     canvasNode.addEventListener("wheel", onWheel, { passive: false });
 
     animate();
@@ -755,6 +889,7 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
       canvasNode.removeEventListener("pointermove", onPointerMove);
       canvasNode.removeEventListener("pointerup", onPointerUp);
       canvasNode.removeEventListener("pointercancel", onPointerUp);
+      canvasNode.removeEventListener("pointerleave", onPointerLeave);
       canvasNode.removeEventListener("wheel", onWheel);
       window.cancelAnimationFrame(engine.rafId);
       if (resizeRafId) {
@@ -764,207 +899,165 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
   }, [graphData]);
 
   const resolvedCount = graphData.nodes.length;
-  const isTerminalOpen = Boolean(selectedNodeId);
-
   const simRunning = simulationStatus?.state === "running";
   const simDone = simulationStatus?.state === "done";
+  const simError = simulationStatus?.state === "error";
   const simDay = simulationStatus?.day || 0;
   const simBarFill = simRunning ? Math.round((simDay / 5) * 100) : simDone ? 100 : 0;
-  const canCallSelectedNode = Boolean(simDone && selectedNodeId && selectedSimulation && selectedAvatarAgent);
-
-  const attachTrack = (track, shouldShowVideo) => {
-    if (track.kind === Track.Kind.Video) {
-      if (!shouldShowVideo) return;
-      const videoHost = videoHostRef.current;
-      if (!videoHost) return;
-      const element = track.attach();
-      element.classList.add("graph-call-card-track");
-      videoHost.appendChild(element);
-      return;
-    }
-    if (track.kind === Track.Kind.Audio) {
-      const audioHost = audioHostRef.current;
-      if (!audioHost) return;
-      const element = track.attach();
-      element.classList.add("graph-call-card-audio");
-      element.autoplay = true;
-      element.controls = false;
-      element.muted = false;
-      audioHost.appendChild(element);
-    }
-  };
-
-  const handleStartCall = async () => {
-    if (!canCallSelectedNode || !selectedNode) return;
-    const simulationReportForNode = simulationData?.[selectedNode.id];
-    if (!simulationReportForNode) return;
-    setIsStartingCall(true);
-    setCallError("");
-    setPortraitFailed(false);
-    setCallCardOpen(true);
-    setActiveCallAgentId(selectedNode.id);
-    clearMediaHosts();
-    if (roomRef.current) {
-      roomRef.current.disconnect();
-      roomRef.current = null;
-    }
-
-    const personName = selectedNode.label || selectedNode.id;
-    setCallStatus(`${personName} is connecting…`);
-
-    try {
-      // Context uses this node's generated simulation report (same source as the report/journey button).
-      const contextOverride = buildAvatarContext(selectedNode, simulationReportForNode);
-      const response = await fetch(AVATAR_START_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agent_id: selectedNode.id,
-          context_override: contextOverride
-        })
-      });
-      if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(`Call start failed (${response.status}): ${detail}`);
-      }
-      const started = await response.json();
-      const shouldShowVideo = Boolean(selectedAvatarAgent?.live_video_enabled);
-      setUseVideoFeed(shouldShowVideo);
-
-      const room = new Room({ adaptiveStream: true, dynacast: true });
-      room.on(RoomEvent.TrackSubscribed, (track) => attachTrack(track, shouldShowVideo));
-      room.on(RoomEvent.TrackUnsubscribed, (track) => {
-        track.detach().forEach((el) => el.remove());
-      });
-      room.on(RoomEvent.ConnectionStateChanged, (state) => {
-        if (state === "connected") {
-          setCallStatus(`${personName} is live`);
-        } else if (state === "connecting") {
-          setCallStatus(`${personName} is connecting…`);
-        } else if (state === "disconnected") {
-          setCallStatus(`${personName} disconnected`);
-        }
-      });
-      await room.connect(started.livekit_url, started.livekit_client_token);
-      try {
-        await room.localParticipant.setMicrophoneEnabled(true);
-      } catch {
-        // Keep call active even if browser blocks mic access.
-      }
-      try {
-        await room.localParticipant.setCameraEnabled(false);
-      } catch {
-        // Ignore camera disable errors.
-      }
-      room.remoteParticipants.forEach((participant) => {
-        participant.trackPublications.forEach((publication) => {
-          if (publication.isSubscribed && publication.track) {
-            attachTrack(publication.track, shouldShowVideo);
-          }
-        });
-      });
-      roomRef.current = room;
-    } catch (error) {
-      setCallError(error instanceof Error ? error.message : "Could not start call.");
-      setCallStatus(`${personName} could not connect`);
-    } finally {
-      setIsStartingCall(false);
-    }
-  };
+  const showGraphActionButtons = simDone && Boolean(selectedNodeId);
+  const showHoverTooltip = Boolean(hoveredNodeId && hoveredNode);
+  const showSelectedTooltip = Boolean(selectedNodeId && selectedNode);
+  const selectedTooltipNoData =
+    simDone && selectedNodeId && !(simulationData && simulationData[selectedNodeId]);
+  const hoverTooltipName = showHoverTooltip
+    ? hoveredNode?.label || hoveredNodeId
+    : hoverTooltipSnapshot.name;
+  const hoverTooltipColumns = showHoverTooltip ? hoveredDetailColumns : hoverTooltipSnapshot.columns;
+  const hoverTooltipNodeId = showHoverTooltip ? hoveredNodeId : hoverTooltipSnapshot.id;
 
   return (
-    <div className={`graph-circle-canvas ${isTerminalOpen ? "terminal-open" : ""}`}>
+    <div className="graph-circle-canvas">
       <div className="graph-circle-stage" ref={stageRef}>
         {resolvedCount === 0 ? (
           <p className="graph-circle-empty">No valid network graph data found in generated CSV.</p>
         ) : null}
-        <canvas ref={canvasRef} className="graph-circle-canvas-element" />
+        <canvas
+          ref={canvasRef}
+          className={`graph-circle-canvas-element ${isCanvasDraggingCursor ? "dragging" : ""}`}
+        />
       </div>
 
-      {(simRunning || simDone) && (
-        <div className={`sim-status-bar ${simDone ? "done" : ""}`}>
+      {(simRunning || simDone || simError) && (
+        <div className={`sim-status-bar ${simDone ? "done" : ""} ${simError ? "error" : ""}`}>
           <div className="sim-status-bar-track">
             <div className="sim-status-bar-fill" style={{ width: `${simBarFill}%` }} />
           </div>
-          <span className="sim-status-label">
-            {simRunning
-              ? `Simulating… Day ${simDay + 1} / 5`
-              : "Simulation complete"}
-          </span>
         </div>
       )}
 
-      <div className="graph-panel-fab-stack" aria-label="Graph actions">
-        <button
-          type="button"
-          className={`graph-panel-fab ${!simDone ? "sim-locked" : ""}`}
-          aria-label="Call"
-          disabled={!canCallSelectedNode || isStartingCall}
-          title={
-            !simDone
-              ? "Available after simulation completes"
-              : !selectedNodeId
-                ? "Select a person first"
-                : !selectedSimulation
-                  ? "No simulation report for this person"
-                  : !selectedAvatarAgent
-                    ? "No avatar mapping for this person"
-                    : "Call"
-          }
-          onClick={handleStartCall}
-        >
-          <img src={callIcon} alt="" />
-        </button>
-        <button
-          type="button"
-          className={`graph-panel-fab ${!simDone ? "sim-locked" : ""}`}
-          aria-label="View Simulation Journey"
-          disabled={!simDone || !(simulationData && simulationData[selectedNodeId])}
-          onClick={
-            simDone && simulationData && simulationData[selectedNodeId]
-              ? () => setJourneyModalOpen(true)
-              : undefined
-          }
-          title={
-            !simDone
-              ? "Available after simulation completes"
-              : simulationData && simulationData[selectedNodeId]
-              ? "View Simulation Journey"
-              : "No simulation data for this agent"
-          }
-        >
-          <img src={notesIcon} alt="" />
-        </button>
+      <div
+        ref={tooltipRef}
+        className={`graph-node-tooltip graph-node-hover-tooltip ${showHoverTooltip ? "open" : ""} ${
+          showSelectedTooltip ? "suppressed" : ""
+        }`}
+        style={{
+          left: `${tooltipPosition.x}px`,
+          top: `${tooltipPosition.y}px`
+        }}
+        aria-hidden={!showHoverTooltip}
+      >
+        <div className="graph-node-terminal-profile">
+          <p className="graph-node-terminal-name">{hoverTooltipName}</p>
+          <div className="graph-node-terminal-grid">
+            {hoverTooltipColumns.map((column, columnIndex) => (
+              <div className="graph-node-terminal-column" key={`hover-detail-column-${columnIndex}`}>
+                {column.map((detailRow, rowIndex) => (
+                  <div
+                    className="graph-node-terminal-row"
+                    key={`hover-detail-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
+                  >
+                    <span className="graph-node-terminal-value" title={detailRow.value}>
+                      {detailRow.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          {simDone && hoverTooltipNodeId && !(simulationData && simulationData[hoverTooltipNodeId]) ? (
+            <p className="sim-no-data">No simulation data for this agent.</p>
+          ) : null}
+        </div>
       </div>
 
       <div
-        className={`graph-node-terminal ${isTerminalOpen ? "open" : ""}`}
-        aria-hidden={!isTerminalOpen}
+        className={`graph-node-tooltip graph-node-selected-tooltip ${
+          showSelectedTooltip ? "open" : ""
+        } ${showGraphActionButtons ? "with-actions" : ""}`}
+        aria-hidden={!showSelectedTooltip}
       >
-        <div className="graph-node-terminal-scroll">
-          <div className="graph-node-terminal-profile">
-            <p className="graph-node-terminal-name">{selectedNode?.label || selectedNodeId}</p>
-            <div className="graph-node-terminal-grid">
-              {detailColumns.map((column, columnIndex) => (
-                <div className="graph-node-terminal-column" key={`detail-column-${columnIndex}`}>
-                  {column.map((detailRow, rowIndex) => (
-                    <div
-                      className="graph-node-terminal-row"
-                      key={`detail-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
-                    >
-                      <span className="graph-node-terminal-key">{detailRow.label}</span>
-                      <span className="graph-node-terminal-value" title={detailRow.value}>
-                        {detailRow.value}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-            {simDone && !(simulationData && simulationData[selectedNodeId]) ? (
-              <p className="sim-no-data">No simulation data for this agent.</p>
-            ) : null}
+        {showGraphActionButtons ? (
+          <div className="graph-panel-fab-stack graph-panel-fab-stack-in-tooltip" aria-label="Graph actions">
+            <button
+              type="button"
+              className="graph-panel-fab graph-panel-fab-sm"
+              aria-label="Call"
+              title="Call"
+            >
+              <img src={callIcon} alt="" />
+            </button>
+            <button
+              type="button"
+              className="graph-panel-fab graph-panel-fab-sm"
+              aria-label="View Simulation Journey"
+              disabled={!(simulationData && simulationData[selectedNodeId])}
+              onClick={
+                simulationData && simulationData[selectedNodeId]
+                  ? () => setJourneyModalOpen(true)
+                  : undefined
+              }
+              title={
+                simulationData && simulationData[selectedNodeId]
+                  ? "View Simulation Journey"
+                  : "No simulation data for this agent"
+              }
+            >
+              <img src={notesIcon} alt="" />
+            </button>
           </div>
+        ) : null}
+        <div className="graph-node-terminal-profile">
+          <p className="graph-node-terminal-name">{selectedTooltipSnapshot.name}</p>
+          <div className="graph-node-terminal-grid">
+            {selectedTooltipSnapshot.columns.map((column, columnIndex) => (
+              <div
+                className="graph-node-terminal-column"
+                key={`selected-detail-column-${columnIndex}`}
+              >
+                {column.map((detailRow, rowIndex) => (
+                  <div
+                    className="graph-node-terminal-row"
+                    key={`selected-detail-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
+                  >
+                    <span className="graph-node-terminal-value" title={detailRow.value}>
+                      {detailRow.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          {selectedTooltipNoData ? (
+            <p className="sim-no-data">No simulation data for this agent.</p>
+          ) : null}
+        </div>
+      </div>
+
+      <div
+        ref={selectedTooltipMeasureRef}
+        className="graph-node-tooltip graph-node-selected-tooltip graph-node-selected-tooltip-measure open"
+        aria-hidden="true"
+      >
+        <div className="graph-node-terminal-profile">
+          <p className="graph-node-terminal-name">{selectedTooltipSnapshot.name}</p>
+          <div className="graph-node-terminal-grid">
+            {selectedTooltipSnapshot.columns.map((column, columnIndex) => (
+              <div
+                className="graph-node-terminal-column"
+                key={`selected-detail-measure-column-${columnIndex}`}
+              >
+                {column.map((detailRow, rowIndex) => (
+                  <div
+                    className="graph-node-terminal-row"
+                    key={`selected-detail-measure-row-${detailRow.key}-${columnIndex}-${rowIndex}`}
+                  >
+                    <span className="graph-node-terminal-value">{detailRow.value}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          {selectedTooltipNoData ? <p className="sim-no-data">No simulation data for this agent.</p> : null}
         </div>
       </div>
 
@@ -994,46 +1087,6 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
               <SimulationJourney data={simulationData[selectedNodeId]} />
             </div>
           </div>
-        </div>
-      )}
-
-      {callCardOpen && activeCallAgentId && (
-        <div className="graph-call-card" role="dialog" aria-label="Agent call card">
-          <div className="graph-call-card-header">
-            <span className="graph-call-card-name">
-              {nodeById.get(activeCallAgentId)?.label || activeCallAgentId}
-            </span>
-            <button
-              type="button"
-              className="graph-call-card-close"
-              onClick={disconnectCall}
-              aria-label="End call"
-            >
-              ✕
-            </button>
-          </div>
-          <div className="graph-call-card-media">
-            {useVideoFeed ? (
-              <div ref={videoHostRef} className="graph-call-card-video-host" />
-            ) : (
-              !portraitFailed ? (
-                <img
-                  src={activePortraitSrc}
-                  alt={nodeById.get(activeCallAgentId)?.label || activeCallAgentId}
-                  className="graph-call-card-photo"
-                  onError={() => setPortraitFailed(true)}
-                />
-              ) : null
-            )}
-            {!useVideoFeed && portraitFailed ? (
-              <div className="graph-call-card-photo-fallback">
-                {nodeById.get(activeCallAgentId)?.label || activeCallAgentId}
-              </div>
-            ) : null}
-          </div>
-          <p className="graph-call-card-status">{callStatus}</p>
-          {callError ? <p className="graph-call-card-error">{callError}</p> : null}
-          <div ref={audioHostRef} className="graph-call-card-audio-host" />
         </div>
       )}
     </div>

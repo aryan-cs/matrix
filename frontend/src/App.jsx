@@ -6,7 +6,6 @@ import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
 import downloadIcon from "../assets/icons/download.svg";
 import dropdownIcon from "../assets/icons/dropdown.svg";
-import micIcon from "../assets/icons/mic.svg";
 import waveformIcon from "../assets/icons/waveform.svg";
 import plannerSystemPromptRaw from "../../planner-system-prompt.txt?raw";
 
@@ -38,7 +37,7 @@ const COMPOSER_DOCK_ANIMATION_MS = 680;
 const ARTIFACT_MODAL_EXIT_MS = 220;
 const THINKING_PLACEHOLDER_OPTIONS = [
   "Performing matrix multiplications...",
-  "Determining...",
+  "Determin(ant)ing...",
   "ad - bc = ...",
   "Grabbing attention...",
   "Convoluting..."
@@ -1114,17 +1113,6 @@ function CsvArtifactCard({
   onDownload = null,
   downloadQueued = false
 }) {
-  const resolvedTotalCount =
-    Number.isFinite(totalCount) && totalCount > 0 ? Math.max(1, Math.round(totalCount)) : null;
-  const generatedCount = Number.isFinite(summary?.rowCount) ? Math.max(0, summary.rowCount) : 0;
-  const displayTotalCount = resolvedTotalCount
-    ? Math.max(resolvedTotalCount, generatedCount)
-    : pending
-      ? null
-      : generatedCount > 0
-        ? generatedCount
-        : null;
-  const progressLabel = `${generatedCount}/${displayTotalCount ?? "?"} samples generated`;
   const isInteractive = typeof onOpen === "function";
   const canDownload = typeof onDownload === "function";
   const downloadLabel = pending
@@ -1149,7 +1137,6 @@ function CsvArtifactCard({
         <div className="csv-artifact-badge">CSV</div>
         <div className="csv-artifact-copy">
           <p className="csv-artifact-title">Generated Agent Data</p>
-          <p className="csv-artifact-meta">{progressLabel}</p>
         </div>
       </button>
       <button
@@ -1256,8 +1243,8 @@ function thoughtDurationLabel(durationSeconds) {
   return `Thought for ${Math.round(durationSeconds)} seconds.`;
 }
 
-function ThinkDisclosure({ id, label, children }) {
-  const [isOpen, setIsOpen] = useState(false);
+function ThinkDisclosure({ id, label, children, defaultOpen = false }) {
+  const [isOpen, setIsOpen] = useState(Boolean(defaultOpen));
 
   return (
     <div className={`chat-assistant-think-details ${isOpen ? "open" : ""}`}>
@@ -1273,6 +1260,17 @@ function ThinkDisclosure({ id, label, children }) {
       </button>
       <div className="chat-assistant-think-panel" id={`${id}-think-panel`} aria-hidden={!isOpen}>
         <div className="chat-assistant-think-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function ThinkingStatusRow({ label }) {
+  return (
+    <div className="chat-meta-think chat-assistant-think-wrap">
+      <div className="chat-assistant-think-summary static" role="status" aria-live="polite">
+        <img className="chat-assistant-think-caret" src={dropdownIcon} alt="" />
+        <span>{label}</span>
       </div>
     </div>
   );
@@ -1349,9 +1347,7 @@ function renderMessageContent(message, options = {}) {
     return (
       <>
         {exaMetaBlock}
-        <div className="chat-meta-think">
-          <p className="chat-thinking-placeholder">{thinkingPlaceholderText}</p>
-        </div>
+        <ThinkingStatusRow label={thinkingPlaceholderText} />
       </>
     );
   }
@@ -1374,22 +1370,6 @@ function renderMessageContent(message, options = {}) {
     Number.isFinite(message.requestedSampleCount) && message.requestedSampleCount > 0
       ? message.requestedSampleCount
       : null;
-  const shouldHoldPendingThinkingStyle =
-    Boolean(message.pending) &&
-    (hasThinkText || isThinkingPlaceholderMessage(message)) &&
-    !hasAnswerText;
-
-  if (shouldHoldPendingThinkingStyle) {
-    return (
-      <>
-        {exaMetaBlock}
-        <div className="chat-meta-think">
-          <p className="chat-thinking-placeholder">{thinkingPlaceholderText}</p>
-        </div>
-      </>
-    );
-  }
-
   if (!hasThinkText) {
     if (showCsvArtifact) {
       return (
@@ -1433,7 +1413,7 @@ function renderMessageContent(message, options = {}) {
     <>
       {exaMetaBlock}
       <div className="chat-meta-think chat-assistant-think-wrap">
-        <ThinkDisclosure id={message.id} label={thinkLabel}>
+        <ThinkDisclosure id={message.id} label={thinkLabel} defaultOpen={Boolean(message.pending)}>
           {renderMarkdownContent(thinkText, `${message.id}-think`)}
         </ThinkDisclosure>
       </div>
@@ -1494,7 +1474,7 @@ function messageHasThinkSection(message) {
 
   const messageText = String(message.content || "");
   if (isThinkingPlaceholderMessage(message)) {
-    return false;
+    return true;
   }
 
   const treatUnclosedAsThinking = Boolean(message.pending) || /<think\s*>/i.test(messageText);
@@ -1752,6 +1732,7 @@ function App() {
   const [clarifyState, setClarifyState] = useState(null);
   const [editState, setEditState] = useState(null);
   const fileInputRef = useRef(null);
+  const composerInputRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const speechChunksRef = useRef([]);
@@ -1759,6 +1740,7 @@ function App() {
   const speechRecognitionRef = useRef(null);
   const speechPrefixTextRef = useRef("");
   const speechFinalizeTimerRef = useRef(0);
+  const speechUpdatesEnabledRef = useRef(false);
   const scenarioTextRef = useRef(scenarioText);
   const chatScrollRef = useRef(null);
   const composerShellRef = useRef(null);
@@ -2061,6 +2043,7 @@ function App() {
 
       let finalText = "";
       recognition.onresult = (event) => {
+        if (!speechUpdatesEnabledRef.current) return;
         let interimText = "";
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
           const result = event.results[i];
@@ -2079,6 +2062,13 @@ function App() {
         setIsSpeechDrivenInput(true);
         scenarioTextRef.current = combined;
         setScenarioText(combined);
+        window.requestAnimationFrame(() => {
+          const input = composerInputRef.current;
+          if (!input) return;
+          const end = combined.length;
+          input.setSelectionRange(end, end);
+          input.scrollLeft = input.scrollWidth;
+        });
       };
       recognition.onerror = () => {
         // Fallback silently to whisper live stream only.
@@ -2095,6 +2085,7 @@ function App() {
   };
 
   const closeSpeechResources = () => {
+    speechUpdatesEnabledRef.current = false;
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
@@ -2151,9 +2142,11 @@ function App() {
     }
     speechSocketRef.current = ws;
     speechPrefixTextRef.current = scenarioTextRef.current.trim();
+    speechUpdatesEnabledRef.current = true;
     startBrowserInterimRecognition();
 
     ws.onmessage = (event) => {
+      if (!speechUpdatesEnabledRef.current) return;
       try {
         const parsed = JSON.parse(String(event.data || "{}"));
         if (parsed?.type === "error") {
@@ -2172,6 +2165,13 @@ function App() {
         if (parsed?.type === "final" || combined.length >= scenarioTextRef.current.length) {
           scenarioTextRef.current = combined;
           setScenarioText(combined);
+          window.requestAnimationFrame(() => {
+            const input = composerInputRef.current;
+            if (!input) return;
+            const end = combined.length;
+            input.setSelectionRange(end, end);
+            input.scrollLeft = input.scrollWidth;
+          });
         }
 
         if (parsed?.type === "final") {
@@ -2264,7 +2264,27 @@ function App() {
     void startSpeechCapture();
   };
 
-  const hasTypedInput = scenarioText.trim().length > 0 && !isSpeechDrivenInput;
+  const isSystemPrompting = chatMessages.some(
+    (message) => message.role === "assistant" && message.pending
+  );
+
+  useEffect(() => {
+    if (!isRecordingSpeech) return undefined;
+
+    const handleEnterWhileRecording = (event) => {
+      if (event.key !== "Enter") return;
+      if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.isComposing) return;
+      event.preventDefault();
+      if (isSubmitting) return;
+      composerShellRef.current?.requestSubmit?.();
+    };
+
+    window.addEventListener("keydown", handleEnterWhileRecording);
+    return () => {
+      window.removeEventListener("keydown", handleEnterWhileRecording);
+    };
+  }, [isRecordingSpeech, isSubmitting]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -2302,56 +2322,53 @@ function App() {
     };
   }, []);
 
-  const prepareCsvForSimulation = async (csvPayload) => {
-    const normalizedCsv = String(csvPayload || "").trim();
-    if (!normalizedCsv) {
-      throw new Error("No generated CSV is available to save before simulation.");
+  const handleRunSimulation = async (graphOverride = null) => {
+    if (simulationStatus?.state === "running") {
+      return { started: false, error: "Simulation is already running." };
     }
-    const response = await fetch("/api/agents/generated-csv", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ csv_text: normalizedCsv })
-    });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`CSV save/script pipeline failed (${response.status}): ${detail}`);
-    }
-    return response.json();
-  };
 
-  const handleRunSimulation = async (csvPayload = "") => {
-    if (simulationStatus?.state === "running") return;
-    const normalizedCsv = String(csvPayload || "").trim();
-    if (normalizedCsv) {
-      try {
-        await prepareCsvForSimulation(normalizedCsv);
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : "Unknown CSV preparation error";
-        setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: detail });
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: createRuntimeId("assistant"),
-            role: "assistant",
-            content: `Could not start simulation because CSV prep failed.\n${detail}`,
-            error: true
-          }
-        ]);
-        return;
-      }
+    const graphPayload =
+      graphOverride && Array.isArray(graphOverride.nodes) && graphOverride.nodes.length > 0
+        ? graphOverride
+        : graphPanelGraph;
+
+    if (!graphPayload || !Array.isArray(graphPayload.nodes) || graphPayload.nodes.length === 0) {
+      const errorText = "No graph data available to start simulation.";
+      setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: errorText });
+      return { started: false, error: errorText };
     }
+
     setSimulationData(null);
     setSimulationStatus({ state: "running", progress: 0, total: 0, day: 0 });
+
     try {
-      await fetch("/api/simulation/run", {
+      const startResponse = await fetch("/api/simulation/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(graphPanelGraph || {}),
+        body: JSON.stringify({
+          nodes: graphPayload.nodes,
+          edges: Array.isArray(graphPayload.edges) ? graphPayload.edges : []
+        }),
       });
-    } catch {
-      setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: "Network error" });
-      return;
+
+      let startBody = null;
+      try {
+        startBody = await startResponse.json();
+      } catch {
+        startBody = null;
+      }
+
+      if (!startResponse.ok) {
+        const detail =
+          startBody?.detail || startBody?.error || `API returned ${startResponse.status}.`;
+        throw new Error(String(detail));
+      }
+    } catch (error) {
+      const errorText = error?.message || "Network error";
+      setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: errorText });
+      return { started: false, error: errorText };
     }
+
     if (simulationPollRef.current) clearInterval(simulationPollRef.current);
     simulationPollRef.current = setInterval(async () => {
       try {
@@ -2369,6 +2386,8 @@ function App() {
         }
       } catch { /* keep polling */ }
     }, 2000);
+
+    return { started: true, error: "" };
   };
 
   useEffect(() => {
@@ -3082,27 +3101,54 @@ function App() {
 
   const handleComposerSubmit = async (event) => {
     event.preventDefault();
-    if (isRecordingSpeech) {
-      stopSpeechCapture();
-    }
     const promptText = scenarioTextRef.current.trim();
+    const filesForSubmit = contextFiles.filter((file) => !removingContextIds.has(file.id));
+
+    if (!promptText && filesForSubmit.length === 0) {
+      if (!isRecordingSpeech && !isTranscribingSpeech) {
+        void startSpeechCapture();
+      }
+      return;
+    }
+
+    // Once we send, fully stop listening/capture immediately.
+    if (isRecordingSpeech || isTranscribingSpeech) {
+      closeSpeechResources();
+      setIsRecordingSpeech(false);
+      setIsTranscribingSpeech(false);
+    }
+
+    // Clear composer immediately after any non-empty send attempt.
+    setScenarioText("");
+    scenarioTextRef.current = "";
+    setIsSpeechDrivenInput(false);
 
     // If we're waiting for edit feedback after CSV generation
     if (editState) {
       if (!promptText) return;
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
-      const noChangesPattern = /^(no|no changes?|looks? good|proceed|continue(?: as is)?|go ahead|start(?: simulation)?|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah|as is|whatever)\b/i;
+      const noChangesPattern = /^(no|no changes?|looks? good|proceed|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah)\b/i;
       if (noChangesPattern.test(promptText.trim())) {
-        const csvPayloadForSimulation = String(editState?.csvPayload || "").trim();
-        setEditState(null);
-        setScenarioText("");
-        scenarioTextRef.current = "";
-        setChatMessages((prev) => [
+        const { csvPayload: currentCsv } = editState;
+        const simulationGraph = buildNetworkGraphFromCsv(currentCsv) || graphPanelGraph;
+      setEditState(null);
+      setScenarioText("");
+        setIsSubmitting(true);
+        const simulationStart = await handleRunSimulation(simulationGraph);
+      scenarioTextRef.current = "";
+      setChatMessages((prev) => [
           ...prev,
           userTurn,
-          { id: createRuntimeId("assistant"), role: "assistant", content: "Starting simulation and preparing agent assets..." }
+          {
+            id: createRuntimeId("assistant"),
+            role: "assistant",
+            content: simulationStart.started
+              ? "Simulation started. Welcome to the desert of the real."
+              : `Couldn't start simulation:\n${simulationStart.error || "Unknown error."}`,
+            uiType: "status-tooltip"
+          }
         ]);
-        void handleRunSimulation(csvPayloadForSimulation);
+        setIsSubmitting(false);
         return;
       }
 
@@ -3208,9 +3254,6 @@ function App() {
       }
       return;
     }
-
-    const filesForSubmit = contextFiles.filter((file) => !removingContextIds.has(file.id));
-    if (!promptText && filesForSubmit.length === 0) return;
 
     if (isPlaceholderTypingActive) {
       setIsPlaceholderTypingActive(false);
@@ -3572,6 +3615,7 @@ function App() {
                   <img src={addIcon} alt="" />
                 </button>
                 <input
+                  ref={composerInputRef}
                   type="text"
                   value={scenarioText}
                   onChange={(event) => {
@@ -3584,39 +3628,15 @@ function App() {
                   aria-label="Simulation scenario"
                 />
                 <button
-                  className={`composer-mic-btn ${isRecordingSpeech ? "recording" : ""}`}
-                  type="button"
-                  aria-label={
-                    isRecordingSpeech
-                      ? "Stop voice capture and transcribe"
-                      : "Start voice capture with speech-to-text"
-                  }
-                  title={
-                    isRecordingSpeech
-                      ? "Stop recording"
-                      : isTranscribingSpeech
-                        ? "Transcribing..."
-                        : "Voice input"
-                  }
-                  disabled={isSubmitting || isTranscribingSpeech}
-                  onClick={handleSpeechButtonClick}
-                >
-                  <img src={micIcon} alt="" />
-                </button>
-                <button
                   className={`send-btn composer-primary-action ${isRecordingSpeech ? "recording" : ""}`}
-                  type={hasTypedInput ? "submit" : "button"}
-                  aria-label={
-                    hasTypedInput
-                      ? "Submit simulation"
-                      : isRecordingSpeech
-                        ? "Stop voice capture and transcribe"
-                        : "Start voice capture with speech-to-text"
-                  }
-                  disabled={isSubmitting || isTranscribingSpeech}
-                  onClick={hasTypedInput ? undefined : handleSpeechButtonClick}
+                  type="submit"
+                  aria-label="Send input"
+                  disabled={isSubmitting || isTranscribingSpeech || isSystemPrompting}
                 >
-                  <img src={hasTypedInput ? arrowUpIcon : waveformIcon} alt="" />
+                  <img
+                    src={isRecordingSpeech ? waveformIcon : scenarioText.trim() ? arrowUpIcon : waveformIcon}
+                    alt=""
+                  />
                 </button>
               </div>
             </div>

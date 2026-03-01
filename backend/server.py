@@ -14,8 +14,25 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Any
-# Add this at the top of server.py
-from network_builder import build_social_graph, GraphBuildResponse, GraphNode, GraphEdge, GraphStats
+
+try:
+    from network_builder import (
+        app as delegated_api_app,
+        build_social_graph,
+        GraphBuildResponse,
+        GraphNode,
+        GraphEdge,
+        GraphStats,
+    )
+except (ImportError, AttributeError):
+    from backend.network_builder import (
+        app as delegated_api_app,
+        build_social_graph,
+        GraphBuildResponse,
+        GraphNode,
+        GraphEdge,
+        GraphStats,
+    )
 
 import modal
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -346,6 +363,9 @@ async def speech_live(websocket: WebSocket):
             pass
 
 # ... (Include build_social_graph and other helper functions from your previous code)
+
+# Delegate all other API routes (including /api/simulation/*) to network_builder.
+web_app.mount("/", delegated_api_app)
 
 @modal_app.local_entrypoint()
 def main():
