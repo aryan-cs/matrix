@@ -1914,10 +1914,6 @@ input {
   filter: brightness(0) invert(1);
 }
 
-.composer-primary-action.recording {
-  background: #ff5f5f;
-}
-
 @keyframes chip-in {
   0% {
     opacity: 0;
