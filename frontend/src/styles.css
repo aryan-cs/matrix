@@ -1871,11 +1871,12 @@ input {
 }
 
 .composer-primary-action {
-  background: #050505;
+  background: #ffffff;
+  color: var(--text);
 }
 
 .composer-primary-action img {
-  filter: brightness(0) invert(1);
+  filter: none;
 }
 
 @keyframes chip-in {

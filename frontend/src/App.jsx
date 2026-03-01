@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import DotWaveBackground from "./components/DotWaveBackground";
 import GraphCirclePanel from "./components/GraphCirclePanel";
 import addIcon from "../assets/icons/add.svg";
-import arrowUpIcon from "../assets/icons/arrow-up.svg";
 import closeIcon from "../assets/icons/close.svg";
 import downloadIcon from "../assets/icons/download.svg";
 import dropdownIcon from "../assets/icons/dropdown.svg";
@@ -1751,6 +1750,7 @@ function App() {
   const [clarifyState, setClarifyState] = useState(null);
   const [editState, setEditState] = useState(null);
   const fileInputRef = useRef(null);
+  const composerInputRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const speechChunksRef = useRef([]);
@@ -1758,6 +1758,7 @@ function App() {
   const speechRecognitionRef = useRef(null);
   const speechPrefixTextRef = useRef("");
   const speechFinalizeTimerRef = useRef(0);
+  const speechUpdatesEnabledRef = useRef(false);
   const scenarioTextRef = useRef(scenarioText);
   const chatScrollRef = useRef(null);
   const composerShellRef = useRef(null);
@@ -2060,6 +2061,7 @@ function App() {
 
       let finalText = "";
       recognition.onresult = (event) => {
+        if (!speechUpdatesEnabledRef.current) return;
         let interimText = "";
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
           const result = event.results[i];
@@ -2078,6 +2080,13 @@ function App() {
         setIsSpeechDrivenInput(true);
         scenarioTextRef.current = combined;
         setScenarioText(combined);
+        window.requestAnimationFrame(() => {
+          const input = composerInputRef.current;
+          if (!input) return;
+          const end = combined.length;
+          input.setSelectionRange(end, end);
+          input.scrollLeft = input.scrollWidth;
+        });
       };
       recognition.onerror = () => {
         // Fallback silently to whisper live stream only.
@@ -2094,6 +2103,7 @@ function App() {
   };
 
   const closeSpeechResources = () => {
+    speechUpdatesEnabledRef.current = false;
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
@@ -2150,9 +2160,11 @@ function App() {
     }
     speechSocketRef.current = ws;
     speechPrefixTextRef.current = scenarioTextRef.current.trim();
+    speechUpdatesEnabledRef.current = true;
     startBrowserInterimRecognition();
 
     ws.onmessage = (event) => {
+      if (!speechUpdatesEnabledRef.current) return;
       try {
         const parsed = JSON.parse(String(event.data || "{}"));
         if (parsed?.type === "error") {
@@ -2171,6 +2183,13 @@ function App() {
         if (parsed?.type === "final" || combined.length >= scenarioTextRef.current.length) {
           scenarioTextRef.current = combined;
           setScenarioText(combined);
+          window.requestAnimationFrame(() => {
+            const input = composerInputRef.current;
+            if (!input) return;
+            const end = combined.length;
+            input.setSelectionRange(end, end);
+            input.scrollLeft = input.scrollWidth;
+          });
         }
 
         if (parsed?.type === "final") {
@@ -2263,7 +2282,27 @@ function App() {
     void startSpeechCapture();
   };
 
-  const hasTypedInput = scenarioText.trim().length > 0;
+  const isSystemPrompting = chatMessages.some(
+    (message) => message.role === "assistant" && message.pending
+  );
+
+  useEffect(() => {
+    if (!isRecordingSpeech) return undefined;
+
+    const handleEnterWhileRecording = (event) => {
+      if (event.key !== "Enter") return;
+      if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.isComposing) return;
+      event.preventDefault();
+      if (isSubmitting) return;
+      composerShellRef.current?.requestSubmit?.();
+    };
+
+    window.addEventListener("keydown", handleEnterWhileRecording);
+    return () => {
+      window.removeEventListener("keydown", handleEnterWhileRecording);
+    };
+  }, [isRecordingSpeech, isSubmitting]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -3045,9 +3084,6 @@ function App() {
 
   const handleComposerSubmit = async (event) => {
     event.preventDefault();
-    if (isRecordingSpeech) {
-      stopSpeechCapture();
-    }
     const promptText = scenarioTextRef.current.trim();
     const filesForSubmit = contextFiles.filter((file) => !removingContextIds.has(file.id));
 
@@ -3057,6 +3093,18 @@ function App() {
       }
       return;
     }
+
+    // Once we send, fully stop listening/capture immediately.
+    if (isRecordingSpeech || isTranscribingSpeech) {
+      closeSpeechResources();
+      setIsRecordingSpeech(false);
+      setIsTranscribingSpeech(false);
+    }
+
+    // Clear composer immediately after any non-empty send attempt.
+    setScenarioText("");
+    scenarioTextRef.current = "";
+    setIsSpeechDrivenInput(false);
 
     // If we're waiting for edit feedback after CSV generation
     if (editState) {
@@ -3539,6 +3587,7 @@ function App() {
                   <img src={addIcon} alt="" />
                 </button>
                 <input
+                  ref={composerInputRef}
                   type="text"
                   value={scenarioText}
                   onChange={(event) => {
@@ -3553,16 +3602,10 @@ function App() {
                 <button
                   className={`send-btn composer-primary-action ${isRecordingSpeech ? "recording" : ""}`}
                   type="submit"
-                  aria-label={
-                    hasTypedInput
-                      ? "Submit simulation"
-                      : isRecordingSpeech
-                        ? "Stop voice capture and transcribe"
-                        : "Start voice capture with speech-to-text"
-                  }
-                  disabled={isSubmitting || isTranscribingSpeech}
+                  aria-label="Send input"
+                  disabled={isSubmitting || isTranscribingSpeech || isSystemPrompting}
                 >
-                  <img src={hasTypedInput ? arrowUpIcon : waveformIcon} alt="" />
+                  <img src={waveformIcon} alt="" />
                 </button>
               </div>
             </div>
