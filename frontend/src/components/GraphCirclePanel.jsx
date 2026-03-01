@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Room, RoomEvent, Track } from "livekit-client";
 
-const AGENTS_ENDPOINT = "/api/avatar/agents";
-const START_ENDPOINT = "/api/avatar/session/start";
-
 function clampNodeRadius(count) {
   if (count <= 12) return 18;
   if (count <= 28) return 14.5;
@@ -26,8 +23,37 @@ const DETAIL_FIELDS = [
   ["home_address", "Location"]
 ];
 
-function buildDetailRows(selectedNode, nodeById, adjacencyById) {
-  if (!selectedNode) return [];
+const TERMINAL_TYPE_INTERVAL_MS = 18;
+const TERMINAL_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const TERMINAL_SPINNER_INTERVAL_MS = 110;
+const SUMMARY_DEFAULT_MODEL_ENDPOINT = "";
+const SUMMARY_DEFAULT_MODEL_ID = "deepseek-r1";
+const SUMMARY_DEFAULT_PROXY_PATH = "/api/planner/chat";
+const AGENTS_ENDPOINT = "/api/avatar/agents";
+const START_ENDPOINT = "/api/avatar/session/start";
+
+const SUMMARY_MODEL_ENDPOINT = (
+  import.meta.env.VITE_PLANNER_CONTEXT_ENDPOINT ||
+  import.meta.env.VITE_PLANNER_MODEL_ENDPOINT ||
+  SUMMARY_DEFAULT_MODEL_ENDPOINT
+).trim();
+const SUMMARY_MODEL_ID = (import.meta.env.VITE_PLANNER_MODEL_ID || SUMMARY_DEFAULT_MODEL_ID).trim();
+const SUMMARY_API_KEY = (import.meta.env.VITE_PLANNER_API_KEY || "").trim();
+const SUMMARY_PROXY_PATH = (
+  import.meta.env.VITE_PLANNER_PROXY_PATH || SUMMARY_DEFAULT_PROXY_PATH
+).trim();
+const USE_SUMMARY_PROXY =
+  import.meta.env.DEV && import.meta.env.VITE_USE_PLANNER_PROXY !== "false";
+
+function plannerChatEndpointFor(baseOrEndpoint) {
+  const trimmed = (baseOrEndpoint || "").trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (trimmed.endsWith("/v1/chat/completions")) return trimmed;
+  return `${trimmed}/v1/chat/completions`;
+}
+
+function buildNodeSummaryContext(selectedNode, nodeById, adjacencyById) {
+  if (!selectedNode) return null;
 
   const preferredConnections = Array.isArray(selectedNode.connections)
     ? selectedNode.connections
@@ -47,24 +73,164 @@ function buildDetailRows(selectedNode, nodeById, adjacencyById) {
       ? connectionIds.map((id) => nodeById.get(id)?.label || id)
       : ["No direct connections listed."];
 
-  const rows = [
-    { label: "__name__", value: selectedNode.label || selectedNode.id },
-    { label: "Agent ID", value: selectedNode.id }
-  ];
-
   const metadata =
     selectedNode.metadata && typeof selectedNode.metadata === "object"
       ? selectedNode.metadata
       : {};
 
+  const lines = [];
+  lines.push(`> agent_id: ${selectedNode.id}`);
+  lines.push(`> name: ${selectedNode.label || selectedNode.id}`);
+
   for (const [key, label] of DETAIL_FIELDS) {
     const value = String(metadata[key] ?? "").trim();
     if (!value) continue;
-    rows.push({ label, value });
+    lines.push(`${label}: ${value}`);
   }
 
-  rows.push({ label: "Connected Nodes", value: connectionNames.join(", ") });
-  return rows;
+  return {
+    agent_id: selectedNode.id,
+    name: selectedNode.label || selectedNode.id,
+    metadata,
+    connection_names: connectionNames,
+    display_lines: lines
+  };
+}
+
+function buildFallbackSummary(context) {
+  if (!context) return "";
+
+  const metadata = context.metadata || {};
+  const age = String(metadata.age || "").trim();
+  const occupation = String(metadata.occupation || "").trim();
+  const segment = String(metadata.segment_key || "").trim();
+  const politicalLean = String(metadata.political_lean || "").trim();
+  const priorities = String(metadata.policy_priorities || "").trim();
+  const connections = Array.isArray(context.connection_names) ? context.connection_names : [];
+
+  const line1Parts = [
+    context.name,
+    age ? `(${age})` : "",
+    occupation ? `is a ${occupation}` : "is a representative agent",
+    segment ? `in ${segment.replaceAll("_", " ")}` : ""
+  ].filter(Boolean);
+  const line2Parts = [
+    politicalLean ? `Lean: ${politicalLean}.` : "",
+    priorities ? `Priorities: ${priorities}.` : "",
+    connections.length > 0
+      ? `Likely talks with: ${connections.slice(0, 4).join(", ")}.`
+      : "No direct network links were provided."
+  ].filter(Boolean);
+
+  const line1 = `> ${line1Parts.join(" ").replace(/\s+/g, " ").trim()}.`;
+  const line2 = `> ${line2Parts.join(" ").replace(/\s+/g, " ").trim()}`;
+  return `${line1}\n${line2}`;
+}
+
+function extractPostThinkText(text) {
+  const raw = String(text || "").replace(/\r\n/g, "\n");
+  if (!raw) return "";
+
+  const closeTagRegex = /<\/think\s*>/gi;
+  let lastCloseEnd = -1;
+  let closeMatch = closeTagRegex.exec(raw);
+  while (closeMatch) {
+    lastCloseEnd = closeTagRegex.lastIndex;
+    closeMatch = closeTagRegex.exec(raw);
+  }
+
+  if (lastCloseEnd !== -1) {
+    return raw.slice(lastCloseEnd).trim();
+  }
+
+  // Fallback: remove any think blocks/tags if present, then return remaining text.
+  return raw
+    .replace(/<think\s*>[\s\S]*?<\/think\s*>/gi, "")
+    .replace(/<think\s*>[\s\S]*$/gi, "")
+    .replace(/<\/?think\s*>/gi, "")
+    .trim();
+}
+
+function normalizeTwoLineSummary(summaryText, fallbackText) {
+  const fallbackLines = String(fallbackText || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const rawLines = String(summaryText || "")
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim().replace(/^[-*>\d.\)\s]+/, ""))
+    .filter(Boolean);
+
+  let lines = rawLines.slice(0, 2);
+  if (lines.length < 2) {
+    const sentenceSplit = String(summaryText || "")
+      .replace(/\s+/g, " ")
+      .split(/(?<=[.!?])\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    lines = sentenceSplit.slice(0, 2);
+  }
+  if (lines.length < 2) {
+    lines = fallbackLines.map((line) => line.replace(/^>\s*/, "")).slice(0, 2);
+  }
+  if (lines.length === 1) {
+    lines.push("Summary unavailable.");
+  }
+  const joinedSummary = lines
+    .slice(0, 2)
+    .map((line) => String(line || "").trim())
+    .filter(Boolean)
+    .join("  |  ");
+  return `> ${joinedSummary}`;
+}
+
+async function generateNodeSummaryWithLlm(context, signal) {
+  const plannerEndpoint = plannerChatEndpointFor(SUMMARY_MODEL_ENDPOINT);
+  const requestUrl = USE_SUMMARY_PROXY ? SUMMARY_PROXY_PATH : plannerEndpoint;
+  if (!requestUrl) {
+    throw new Error("Planner endpoint is not configured.");
+  }
+
+  const payload = {
+    model: SUMMARY_MODEL_ID,
+    temperature: 0.2,
+    stream: false,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You summarize one simulated representative profile in exactly 2 lines. Keep each line concise, plain text, no markdown lists, no bullets, no numbering, no preamble, and no reasoning text."
+      },
+      {
+        role: "user",
+        content:
+          "Using this node context, write exactly 2 lines that summarize this person and their network relevance.\n\n" +
+          JSON.stringify(context, null, 2)
+      }
+    ]
+  };
+
+  const response = await fetch(requestUrl, {
+    signal,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(!USE_SUMMARY_PROXY && SUMMARY_API_KEY
+        ? { Authorization: `Bearer ${SUMMARY_API_KEY}` }
+        : {})
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Summary endpoint responded ${response.status}`);
+  }
+
+  const parsed = await response.json();
+  const rawContent = String(parsed?.choices?.[0]?.message?.content || "").trim();
+  const postThinkContent = extractPostThinkText(rawContent);
+  return postThinkContent || rawContent;
 }
 
 function normalizeGraphData(graph) {
@@ -171,6 +337,10 @@ function clamp(value, min, max) {
 
 function GraphCirclePanel({ graph = null }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [terminalText, setTerminalText] = useState("");
+  const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
+  const [summaryCache, setSummaryCache] = useState({});
+  const [summaryLoading, setSummaryLoading] = useState({});
   const [mappedAgentsById, setMappedAgentsById] = useState({});
   const [avatarStatus, setAvatarStatus] = useState("Select a node to preview avatar.");
   const [avatarError, setAvatarError] = useState("");
@@ -178,6 +348,8 @@ function GraphCirclePanel({ graph = null }) {
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
+  const terminalScrollRef = useRef(null);
+  const summaryRequestSeqRef = useRef(0);
   const roomRef = useRef(null);
   const mediaRef = useRef(null);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
@@ -196,14 +368,16 @@ function GraphCirclePanel({ graph = null }) {
     }
     return adjacency;
   }, [graphData]);
-  const detailTargetRows = useMemo(() => {
+  const terminalTargetText = useMemo(() => {
     const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) : null;
-    return buildDetailRows(selectedNode, nodeById, adjacencyById);
-  }, [selectedNodeId, nodeById, adjacencyById]);
+    if (!selectedNode) return "";
+    return summaryCache[selectedNodeId] || "";
+  }, [selectedNodeId, nodeById, summaryCache]);
   const selectedMappedAgent = useMemo(() => {
     if (!selectedNodeId) return null;
     return mappedAgentsById[selectedNodeId] || null;
   }, [selectedNodeId, mappedAgentsById]);
+  const isSummaryPending = Boolean(selectedNodeId && !summaryCache[selectedNodeId]);
 
   const clearMedia = () => {
     const node = mediaRef.current;
@@ -233,7 +407,18 @@ function GraphCirclePanel({ graph = null }) {
   };
 
   useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
+  }, [selectedNodeId]);
+
+  useEffect(() => {
+    if (selectedNodeId && !nodeById.has(selectedNodeId)) {
+      setSelectedNodeId("");
+    }
+  }, [selectedNodeId, nodeById]);
+
+  useEffect(() => {
     let cancelled = false;
+
     const loadMappedAgents = async () => {
       try {
         const response = await fetch(AGENTS_ENDPOINT);
@@ -250,24 +435,15 @@ function GraphCirclePanel({ graph = null }) {
           setMappedAgentsById(byId);
         }
       } catch {
-        // Keep graph behavior unchanged if avatar endpoints are unavailable.
+        // Leave graph summary UI functional even if avatar API is unavailable.
       }
     };
+
     loadMappedAgents();
     return () => {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    selectedNodeIdRef.current = selectedNodeId;
-  }, [selectedNodeId]);
-
-  useEffect(() => {
-    if (selectedNodeId && !nodeById.has(selectedNodeId)) {
-      setSelectedNodeId("");
-    }
-  }, [selectedNodeId, nodeById]);
 
   useEffect(() => {
     let cancelled = false;
@@ -334,6 +510,7 @@ function GraphCirclePanel({ graph = null }) {
             }
           });
         });
+
         roomRef.current = room;
         setAvatarStatus(`Avatar ready for ${selectedNodeId}.`);
       } catch (error) {
@@ -355,6 +532,92 @@ function GraphCirclePanel({ graph = null }) {
   useEffect(() => {
     return () => disconnectAvatar();
   }, []);
+
+  useEffect(() => {
+    const activeNodeId = selectedNodeId;
+    const selectedNode = activeNodeId ? nodeById.get(activeNodeId) : null;
+    if (!selectedNode || summaryCache[activeNodeId] || summaryLoading[activeNodeId]) {
+      return undefined;
+    }
+
+    const context = buildNodeSummaryContext(selectedNode, nodeById, adjacencyById);
+    const fallbackSummary = buildFallbackSummary(context);
+    const requestSeq = summaryRequestSeqRef.current + 1;
+    summaryRequestSeqRef.current = requestSeq;
+    const controller = new AbortController();
+
+    setSummaryLoading((prev) => ({ ...prev, [activeNodeId]: true }));
+
+    (async () => {
+      try {
+        const rawSummary = await generateNodeSummaryWithLlm(context, controller.signal);
+        if (controller.signal.aborted) return;
+        if (summaryRequestSeqRef.current !== requestSeq) return;
+        const normalized = normalizeTwoLineSummary(rawSummary, fallbackSummary);
+        setSummaryCache((prev) => ({ ...prev, [activeNodeId]: normalized }));
+      } catch {
+        if (controller.signal.aborted) return;
+        if (summaryRequestSeqRef.current !== requestSeq) return;
+        setSummaryCache((prev) => ({ ...prev, [activeNodeId]: fallbackSummary }));
+      } finally {
+        setSummaryLoading((prev) => ({ ...prev, [activeNodeId]: false }));
+      }
+    })();
+
+    return () => {
+      controller.abort();
+      setSummaryLoading((prev) => ({ ...prev, [activeNodeId]: false }));
+    };
+  }, [selectedNodeId, nodeById, adjacencyById, summaryCache]);
+
+  useEffect(() => {
+    if (!isSummaryPending) return undefined;
+
+    setSpinnerFrameIndex(0);
+    const timerId = window.setInterval(() => {
+      setSpinnerFrameIndex((prev) => (prev + 1) % TERMINAL_SPINNER_FRAMES.length);
+    }, TERMINAL_SPINNER_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [isSummaryPending]);
+
+  useEffect(() => {
+    if (!selectedNodeId || !terminalTargetText) {
+      setTerminalText("");
+      return undefined;
+    }
+
+    let charIndex = 0;
+    setTerminalText("");
+
+    const timerId = window.setInterval(() => {
+      const remaining = terminalTargetText.length - charIndex;
+      if (remaining <= 0) {
+        window.clearInterval(timerId);
+        return;
+      }
+
+      const step = Math.max(1, Math.min(3, Math.ceil(remaining / 36)));
+      charIndex = Math.min(terminalTargetText.length, charIndex + step);
+      setTerminalText(terminalTargetText.slice(0, charIndex));
+
+      if (charIndex >= terminalTargetText.length) {
+        window.clearInterval(timerId);
+      }
+    }, TERMINAL_TYPE_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [selectedNodeId, terminalTargetText]);
+
+  useEffect(() => {
+    const terminalNode = terminalScrollRef.current;
+    if (!terminalNode) return;
+    terminalNode.scrollTop = terminalNode.scrollHeight;
+  }, [terminalText]);
 
   useEffect(() => {
     const stageNode = stageRef.current;
@@ -602,12 +865,14 @@ function GraphCirclePanel({ graph = null }) {
         const labelVisibility = clamp((engine.width - 240) / 180, 0, 1);
         if (labelVisibility > 0.02) {
           const labelScale = 0.72 + labelVisibility * 0.28;
-          const labelFontSize = Math.max(
+          const nameFontSize = Math.max(
             8,
             Math.min(13, Math.floor((visualRadius * 0.52 + 5) * labelScale))
           );
+          const idFontSize = Math.max(8, Math.floor(nameFontSize * 0.86));
           const labelOffset = 4 + labelVisibility * 4;
-          const labelY = node.y - visualRadius - (1 + (1 - labelVisibility) * 1.5);
+          const nameY = node.y - visualRadius - (1 + (1 - labelVisibility) * 1.5);
+          const idY = nameY + Math.max(10, Math.floor(nameFontSize * 1.08));
           const maxLabelWidth = Math.min(engine.width * 0.4, 180);
           const rawRightX = node.x + visualRadius + labelOffset;
           let labelX = rawRightX;
@@ -617,11 +882,15 @@ function GraphCirclePanel({ graph = null }) {
             labelX = node.x - visualRadius - labelOffset;
           }
 
-          context.font = `500 ${labelFontSize}px "Google Sans", sans-serif`;
+          context.font = `500 ${nameFontSize}px "Google Sans", sans-serif`;
           context.textAlign = labelAlign;
           context.textBaseline = "alphabetic";
           context.fillStyle = `rgba(255, 255, 255, ${(0.42 + node.depth * 0.3) * labelVisibility})`;
-          context.fillText(node.label || node.id, labelX, labelY);
+          context.fillText(node.label || node.id, labelX, nameY);
+
+          context.font = `500 ${idFontSize}px "Google Sans Code", "Google Sans", ui-monospace, monospace`;
+          context.fillStyle = `rgba(190, 190, 190, ${(0.4 + node.depth * 0.28) * labelVisibility})`;
+          context.fillText(node.id, labelX, idY);
         }
       }
     };
@@ -686,17 +955,21 @@ function GraphCirclePanel({ graph = null }) {
   }, [graphData]);
 
   const resolvedCount = graphData.nodes.length;
+  const isTerminalOpen = Boolean(selectedNodeId);
 
   return (
-    <div className="graph-circle-canvas">
+    <div className={`graph-circle-canvas ${isTerminalOpen ? "terminal-open" : ""}`}>
       <div className="graph-circle-stage" ref={stageRef}>
         {resolvedCount === 0 ? (
           <p className="graph-circle-empty">No valid network graph data found in generated CSV.</p>
         ) : null}
         <canvas ref={canvasRef} className="graph-circle-canvas-element" />
       </div>
-      {selectedNodeId ? (
-        <div className="graph-node-inspector active">
+      <div
+        className={`graph-node-terminal ${isTerminalOpen ? "open" : ""}`}
+        aria-hidden={!isTerminalOpen}
+      >
+        <div className="graph-node-terminal-scroll" ref={terminalScrollRef}>
           <div className="graph-node-avatar">
             <div ref={mediaRef} className="graph-node-avatar-media" />
             <p className="graph-node-avatar-status">{avatarStatus}</p>
@@ -707,22 +980,27 @@ function GraphCirclePanel({ graph = null }) {
               </p>
             ) : null}
           </div>
-          <dl className="graph-node-inspector-grid">
-            {detailTargetRows.map((row, index) =>
-              row.label === "__name__" ? (
-                <div className="graph-node-inspector-row name" key={`name-${index}`}>
-                  <dd className="graph-node-inspector-name">{row.value}</dd>
-                </div>
-              ) : (
-                <div className="graph-node-inspector-row" key={`${row.label}-${index}`}>
-                  <dt className="graph-node-inspector-label">{row.label}</dt>
-                  <dd className="graph-node-inspector-value">{row.value}</dd>
-                </div>
-              )
+          <pre className="graph-node-terminal-text">
+            {isSummaryPending ? (
+              <>
+                {`$ Loading profile summary... ${TERMINAL_SPINNER_FRAMES[spinnerFrameIndex]}`}
+                <span className="graph-node-terminal-caret" aria-hidden="true">
+                  ▋
+                </span>
+              </>
+            ) : (
+              <>
+                {terminalText}
+                {isTerminalOpen && terminalText.length < terminalTargetText.length ? (
+                  <span className="graph-node-terminal-caret" aria-hidden="true">
+                    ▋
+                  </span>
+                ) : null}
+              </>
             )}
-          </dl>
+          </pre>
         </div>
-      ) : null}
+      </div>
     </div>
   );
 }

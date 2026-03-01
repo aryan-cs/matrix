@@ -100,10 +100,10 @@ input {
 
 .graph-circle-canvas {
   position: relative;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  display: block;
   width: 100%;
   height: 100%;
+  overflow: hidden;
 }
 
 .graph-circle-stage {
@@ -115,6 +115,13 @@ input {
   background: transparent;
   box-shadow: none;
   border-radius: 0;
+  transform: translateY(0);
+  transition: transform 720ms var(--ease-slingshot);
+  will-change: transform;
+}
+
+.graph-circle-canvas.terminal-open .graph-circle-stage {
+  transform: translateY(-108px);
 }
 
 .graph-circle-empty {
@@ -143,18 +150,67 @@ input {
   cursor: grabbing;
 }
 
-.graph-node-inspector {
-  position: relative;
+.graph-node-terminal {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
   min-height: 150px;
-  padding: 14px 16px 14px;
+  max-height: 46%;
+  padding: 10px 12px;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: flex-start;
+  align-items: stretch;
   pointer-events: auto;
-  overflow: auto;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(0, 0, 0, 0.9);
+  background: rgba(0, 0, 0, 0.92);
+  backdrop-filter: blur(2px);
+  transform: translateY(102%);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform 720ms var(--ease-slingshot),
+    opacity 260ms var(--ease-soft);
+  will-change: transform, opacity;
+}
+
+.graph-node-terminal.open {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.graph-node-terminal-scroll {
+  width: 100%;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.graph-node-terminal-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.graph-node-terminal-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: rgba(225, 225, 225, 0.94);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.graph-node-terminal-caret {
+  margin-left: 1px;
+  color: rgba(240, 240, 240, 0.9);
+  animation: graph-terminal-caret-blink 0.95s steps(1, end) infinite;
 }
 
 .graph-node-avatar {
@@ -164,8 +220,8 @@ input {
 }
 
 .graph-node-avatar-media {
-  width: min(100%, 340px);
-  min-height: 150px;
+  width: min(100%, 360px);
+  min-height: 160px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.05);
@@ -181,7 +237,7 @@ input {
 
 .graph-node-avatar-status {
   margin: 0;
-  color: rgba(255, 255, 255, 0.72);
+  color: rgba(255, 255, 255, 0.74);
   font-size: 0.74rem;
   line-height: 1.35;
 }
@@ -201,61 +257,13 @@ input {
   word-break: break-word;
 }
 
-.graph-node-inspector-grid {
-  margin: 0;
-  width: 100%;
-  display: grid;
-  gap: 6px;
-}
-
-.graph-node-inspector-row {
-  display: grid;
-  grid-template-columns: minmax(88px, 128px) minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-}
-
-.graph-node-inspector-row.name {
-  grid-template-columns: minmax(0, 1fr);
-  margin-bottom: 2px;
-}
-
-.graph-node-inspector-name {
-  margin: 0;
-  color: rgba(255, 255, 255, 0.97);
-  font-size: 0.92rem;
-  line-height: 1.28;
-  font-weight: 700;
-  letter-spacing: 0.005em;
-  font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-}
-
-.graph-node-inspector-label {
-  margin: 0;
-  color: rgba(255, 255, 255, 0.66);
-  font-size: 0.72rem;
-  line-height: 1.32;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-}
-
-.graph-node-inspector-value {
-  margin: 0;
-  color: rgba(255, 255, 255, 0.94);
-  font-size: 0.8rem;
-  line-height: 1.4;
-  word-break: break-word;
-  font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-}
-
-.graph-node-inspector-hint {
-  margin: 0;
-  color: rgba(255, 255, 255, 0.66);
-  font-size: 0.8rem;
-  line-height: 1.35;
-  font-style: italic;
-  font-family: "Google Sans Code", "Google Sans", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+@keyframes graph-terminal-caret-blink {
+  0%, 46% {
+    opacity: 1;
+  }
+  47%, 100% {
+    opacity: 0;
+  }
 }
 
 @keyframes graph-panel-sling-in {
@@ -405,35 +413,6 @@ input {
   cursor: not-allowed;
 }
 
-.agent-avatar-turn-row {
-  display: flex;
-  gap: 8px;
-}
-
-.agent-avatar-turn-row input {
-  flex: 1;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(0, 0, 0, 0.28);
-  color: var(--text);
-  padding: 8px 10px;
-}
-
-.agent-avatar-turn-row button {
-  border: none;
-  border-radius: 10px;
-  padding: 8px 12px;
-  font-weight: 600;
-  cursor: pointer;
-  background: rgba(255, 255, 255, 0.95);
-  color: #111;
-}
-
-.agent-avatar-turn-row button:disabled {
-  opacity: 0.62;
-  cursor: not-allowed;
-}
-
 .agent-avatar-status {
   margin: 0;
   color: var(--muted-strong);
@@ -450,12 +429,6 @@ input {
   margin: 0;
   font-size: 0.86rem;
   color: var(--muted-strong);
-}
-
-.agent-avatar-reply {
-  margin: 0;
-  color: var(--text);
-  font-size: 0.9rem;
 }
 
 .agent-avatar-context {
@@ -493,10 +466,6 @@ input {
   max-height: 360px;
   border-radius: 10px;
   background: #000;
-}
-
-.agent-avatar-audio {
-  width: 100%;
 }
 
 .avatar-test-panel {
