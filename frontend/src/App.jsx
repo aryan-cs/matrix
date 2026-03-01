@@ -1718,7 +1718,11 @@ function App() {
     setSimulationStatus({ state: "running", progress: 0, total: 0, day: 0 });
 
     try {
-      await fetch("/api/simulation/run", { method: "POST" });
+      await fetch("/api/simulation/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(graphPanelGraph || {}),
+      });
     } catch {
       setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: "Network error" });
       return;

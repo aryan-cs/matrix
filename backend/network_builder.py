@@ -842,18 +842,22 @@ async def _store_supermemory(agent_id: str, day: int, content: str) -> None:
 async def _call_sim_agent(
     agent_id: str,
     system_prompt: str,
+    full_name: str,
     incoming_messages: list[str],
+    neighbor_names: list[str],
 ) -> str:
     """Call the DeepSeek LLM for one agent turn in the simulation."""
-    first_name = agent_id
-    if "You are " in system_prompt:
-        full_name = system_prompt.split("You are ", 1)[1].split(",")[0].strip()
-        first_name = full_name.split()[0]
+    first_name = full_name.split()[0] if full_name else agent_id
 
-    if len(incoming_messages) == 1:
-        user_content = f'Your neighbor just shared: "{incoming_messages[0]}"'
+    if len(incoming_messages) == 1 and not neighbor_names:
+        user_content = f'You just heard this news: "{incoming_messages[0]}"'
+    elif len(incoming_messages) == 1:
+        user_content = f'Your neighbor {neighbor_names[0]} just shared: "{incoming_messages[0]}"'
     else:
-        msgs = "\n".join(f'- "{m[:200]}"' for m in incoming_messages[:5])
+        msgs = "\n".join(
+            f'- {neighbor_names[i] if i < len(neighbor_names) else "Someone"} said: "{m[:200]}"'
+            for i, m in enumerate(incoming_messages[:5])
+        )
         user_content = f"Your neighbors have been talking:\n{msgs}\nWhat's your take?"
 
     payload = {
@@ -862,9 +866,9 @@ async def _call_sim_agent(
             {
                 "role": "system",
                 "content": (
-                    f"{system_prompt}\n\n"
-                    f"Speak as {first_name} in first person ('I', 'me', 'my'). "
-                    f"Never say your own name. Never narrate. "
+                    f"You ARE {full_name}. {system_prompt}\n\n"
+                    f"IMPORTANT: You are {full_name}. Speak in first person ('I', 'me', 'my'). "
+                    f"Never use any other name for yourself. Never narrate. "
                     f"Respond in 2-3 sentences only."
                 ),
             },
@@ -885,19 +889,22 @@ async def _call_sim_agent(
             return f"[{agent_id} unavailable: {exc}]"
 
 
-async def _run_simulation_task() -> None:
+async def _run_simulation_task(graph_data: dict | None = None) -> None:
     """Background task: run the full 5-day simulation."""
     global _sim_status, _sim_results
 
     try:
-        if not SIMULATION_GRAPH_PATH.exists():
+        if graph_data and graph_data.get("nodes"):
+            graph = graph_data
+        elif SIMULATION_GRAPH_PATH.exists():
+            graph = json.loads(SIMULATION_GRAPH_PATH.read_text(encoding="utf-8"))
+        else:
             _sim_status = {
                 "state": "error", "progress": 0, "total": 0, "day": 0,
-                "error": "graph.json not found",
+                "error": "No graph data provided and graph.json not found",
             }
             return
 
-        graph = json.loads(SIMULATION_GRAPH_PATH.read_text(encoding="utf-8"))
         nodes = graph.get("nodes", [])
         agent_map = {n["id"]: n for n in nodes}
         all_ids = [n["id"] for n in nodes]
@@ -916,23 +923,34 @@ async def _run_simulation_task() -> None:
             tasks = []
             task_ids = []
 
+            day_talked_to: dict[str, list[str]] = {}
+
             for agent_id in all_ids:
                 agent = agent_map[agent_id]
                 system_prompt = agent["metadata"].get("system_prompt", "")
+                agent_full_name = agent["metadata"].get("full_name", agent_id)
                 neighbors = agent.get("connections", [])
 
                 if day == 0:
                     incoming = [SIMULATION_NEWS_SPARK]
+                    neighbor_names_for_call: list[str] = []
+                    day_talked_to[agent_id] = []
                 else:
-                    incoming = [
-                        current_messages[nid]
-                        for nid in neighbors
-                        if nid in current_messages
+                    active_neighbors = [nid for nid in neighbors if nid in current_messages]
+                    if not active_neighbors:
+                        active_neighbors = [agent_id] if agent_id in current_messages else []
+                    incoming = [current_messages[nid] for nid in active_neighbors] if active_neighbors else [SIMULATION_NEWS_SPARK]
+                    neighbor_names_for_call = [
+                        agent_map[nid]["metadata"].get("full_name", nid)
+                        for nid in active_neighbors
                     ]
-                    if not incoming:
-                        incoming = [current_messages.get(agent_id, SIMULATION_NEWS_SPARK)]
+                    day_talked_to[agent_id] = [
+                        agent_map[nid]["metadata"].get("full_name", nid)
+                        for nid in active_neighbors
+                        if nid != agent_id
+                    ]
 
-                tasks.append(_call_sim_agent(agent_id, system_prompt, incoming))
+                tasks.append(_call_sim_agent(agent_id, system_prompt, agent_full_name, incoming, neighbor_names_for_call))
                 task_ids.append(agent_id)
 
             responses = await asyncio.gather(*tasks)
@@ -941,7 +959,11 @@ async def _run_simulation_task() -> None:
             memory_tasks = []
             for agent_id, response in zip(task_ids, responses):
                 next_messages[agent_id] = response
-                results[agent_id].append({"day": day, "content": response})
+                results[agent_id].append({
+                    "day": day,
+                    "content": response,
+                    "talked_to": day_talked_to.get(agent_id, []),
+                })
                 memory_tasks.append(_store_supermemory(agent_id, day, response))
                 done += 1
 
@@ -973,14 +995,22 @@ async def _run_simulation_task() -> None:
         }
 
 
+class SimulationRunRequest(BaseModel):
+    nodes: list[dict] | None = None
+    edges: list[dict] | None = None
+
+
 @app.post("/api/simulation/run")
-async def simulation_run(background_tasks: BackgroundTasks):
+async def simulation_run(background_tasks: BackgroundTasks, body: SimulationRunRequest | None = None):
     global _sim_status, _sim_results
     if _sim_status["state"] == "running":
         return {"status": "already_running"}
     _sim_status = {"state": "running", "progress": 0, "total": 0, "day": 0, "error": ""}
     _sim_results = {}
-    background_tasks.add_task(_run_simulation_task)
+    graph_data = None
+    if body and body.nodes:
+        graph_data = {"nodes": body.nodes, "edges": body.edges or []}
+    background_tasks.add_task(_run_simulation_task, graph_data)
     return {"status": "started"}
 
 

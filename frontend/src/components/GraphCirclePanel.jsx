@@ -193,16 +193,30 @@ function SimulationJourney({ data }) {
               </button>
             ))}
           </div>
-          {expandedDay >= 0 && (
-            <div className="sim-day-expanded">
-              {data.days.find((d) => d.day === expandedDay)?.content || ""}
-            </div>
-          )}
+          {expandedDay >= 0 && (() => {
+            const dayData = data.days.find((d) => d.day === expandedDay);
+            if (!dayData) return null;
+            return (
+              <div className="sim-day-expanded">
+                {dayData.talked_to && dayData.talked_to.length > 0 && (
+                  <div className="sim-talked-to">
+                    Talked to: {dayData.talked_to.join(", ")}
+                  </div>
+                )}
+                <div>{dayData.content}</div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
       <div className="sim-section final">
         <div className="sim-section-label">Final Position (Day {data.days.length})</div>
+        {data.days[data.days.length - 1]?.talked_to?.length > 0 && (
+          <div className="sim-talked-to">
+            Talked to: {data.days[data.days.length - 1].talked_to.join(", ")}
+          </div>
+        )}
         <div className="sim-section-text">{data.final}</div>
       </div>
     </div>
