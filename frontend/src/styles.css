@@ -221,11 +221,18 @@ input {
 
 .graph-node-avatar-media {
   width: min(100%, 360px);
-  min-height: 160px;
+  height: 200px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(255, 255, 255, 0.05);
   overflow: hidden;
+}
+
+.graph-node-portrait-image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
 }
 
 .graph-node-avatar-track {
@@ -233,6 +240,18 @@ input {
   height: 100%;
   display: block;
   object-fit: cover;
+}
+
+.graph-node-avatar-track[data-kind="audio"] {
+  width: 1px;
+  height: 1px;
+  object-fit: initial;
+}
+
+.graph-node-avatar-audio-hidden {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .graph-node-avatar-status {

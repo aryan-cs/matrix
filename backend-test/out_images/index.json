@@ -3,55 +3,55 @@
     "run_id": "run_tx_tax_proposal_v1",
     "agent_id": "TX-001",
     "full_name": "Ana Garcia",
-    "segment_key": "houston_urban",
+    "segment_key": "houston_small_business",
     "age": "38",
     "gender": "Female",
-    "ethnicity": "Latina",
-    "occupation": "Small business owner (local restaurant)",
-    "image_path": "out_images/TX-001.webp"
+    "ethnicity": "Mexican American",
+    "occupation": "Local restaurant owner",
+    "image_path": "/Users/bowenzhu/Desktop/Hackillinois/matrix/backend-test/out_images/TX-001.webp"
   },
   {
     "run_id": "run_tx_tax_proposal_v1",
     "agent_id": "TX-002",
-    "full_name": "James Martinez",
-    "segment_key": "austin_tech",
-    "age": "32",
+    "full_name": "James Carter",
+    "segment_key": "dallas_luxury_property",
+    "age": "52",
     "gender": "Male",
-    "ethnicity": "Latino",
-    "occupation": "Software engineer at tech startup",
-    "image_path": "out_images/TX-002.webp"
+    "ethnicity": "White",
+    "occupation": "Real estate developer",
+    "image_path": "/Users/bowenzhu/Desktop/Hackillinois/matrix/backend-test/out_images/TX-002.webp"
   },
   {
     "run_id": "run_tx_tax_proposal_v1",
     "agent_id": "TX-003",
-    "full_name": "Sarah Johnson",
-    "segment_key": "dallas_suburb",
-    "age": "45",
+    "full_name": "Sarah Thompson",
+    "segment_key": "austin_working_family",
+    "age": "34",
     "gender": "Female",
     "ethnicity": "White",
-    "occupation": "Marketing manager",
-    "image_path": "out_images/TX-003.webp"
+    "occupation": "Software developer",
+    "image_path": "/Users/bowenzhu/Desktop/Hackillinois/matrix/backend-test/out_images/TX-003.webp"
   },
   {
     "run_id": "run_tx_tax_proposal_v1",
     "agent_id": "TX-004",
-    "full_name": "Michael Brown",
-    "segment_key": "san_antonio_rural",
-    "age": "52",
+    "full_name": "Michael Johnson",
+    "segment_key": "san_antonio_retiree",
+    "age": "67",
     "gender": "Male",
     "ethnicity": "White",
-    "occupation": "Rural farmer",
-    "image_path": "out_images/TX-004.webp"
+    "occupation": "Retired factory worker",
+    "image_path": "/Users/bowenzhu/Desktop/Hackillinois/matrix/backend-test/out_images/TX-004.webp"
   },
   {
     "run_id": "run_tx_tax_proposal_v1",
     "agent_id": "TX-005",
-    "full_name": "Emma Davis",
-    "segment_key": "austin_student",
-    "age": "24",
+    "full_name": "Laura Martinez",
+    "segment_key": "lubbock_rural_farm",
+    "age": "45",
     "gender": "Female",
-    "ethnicity": "White",
-    "occupation": "Computer science major and part-time barista",
-    "image_path": "out_images/TX-005.webp"
+    "ethnicity": "Mexican American",
+    "occupation": "Family farm operator",
+    "image_path": "/Users/bowenzhu/Desktop/Hackillinois/matrix/backend-test/out_images/TX-005.webp"
   }
 ]

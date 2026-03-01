@@ -31,6 +31,7 @@ const SUMMARY_DEFAULT_MODEL_ID = "deepseek-r1";
 const SUMMARY_DEFAULT_PROXY_PATH = "/api/planner/chat";
 const AGENTS_ENDPOINT = "/api/avatar/agents";
 const START_ENDPOINT = "/api/avatar/session/start";
+const PORTRAIT_ENDPOINT = "/api/portrait";
 
 const SUMMARY_MODEL_ENDPOINT = (
   import.meta.env.VITE_PLANNER_CONTEXT_ENDPOINT ||
@@ -351,7 +352,7 @@ function GraphCirclePanel({ graph = null }) {
   const terminalScrollRef = useRef(null);
   const summaryRequestSeqRef = useRef(0);
   const roomRef = useRef(null);
-  const mediaRef = useRef(null);
+  const audioSinkRef = useRef(null);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -368,6 +369,10 @@ function GraphCirclePanel({ graph = null }) {
     }
     return adjacency;
   }, [graphData]);
+  const selectedNode = useMemo(
+    () => (selectedNodeId ? nodeById.get(selectedNodeId) || null : null),
+    [selectedNodeId, nodeById]
+  );
   const terminalTargetText = useMemo(() => {
     const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) : null;
     if (!selectedNode) return "";
@@ -377,10 +382,21 @@ function GraphCirclePanel({ graph = null }) {
     if (!selectedNodeId) return null;
     return mappedAgentsById[selectedNodeId] || null;
   }, [selectedNodeId, mappedAgentsById]);
+  const selectedPortraitUrl = useMemo(() => {
+    if (!selectedNodeId) return "";
+    return `${PORTRAIT_ENDPOINT}/${encodeURIComponent(selectedNodeId)}`;
+  }, [selectedNodeId]);
+  const avatarContextOverride = useMemo(() => {
+    if (!selectedNodeId || !selectedNode) return "";
+    const cached = String(summaryCache[selectedNodeId] || "").trim();
+    if (cached) return cached;
+    const ctx = buildNodeSummaryContext(selectedNode, nodeById, adjacencyById);
+    return String(buildFallbackSummary(ctx) || "").trim();
+  }, [selectedNodeId, selectedNode, summaryCache, nodeById, adjacencyById]);
   const isSummaryPending = Boolean(selectedNodeId && !summaryCache[selectedNodeId]);
 
-  const clearMedia = () => {
-    const node = mediaRef.current;
+  const clearAudioSink = () => {
+    const node = audioSinkRef.current;
     if (!node) return;
     while (node.firstChild) {
       node.removeChild(node.firstChild);
@@ -392,16 +408,30 @@ function GraphCirclePanel({ graph = null }) {
       roomRef.current.disconnect();
       roomRef.current = null;
     }
-    clearMedia();
+    clearAudioSink();
   };
 
   const attachTrack = (track) => {
-    const node = mediaRef.current;
+    if (track.kind !== Track.Kind.Audio) {
+      return;
+    }
+
+    const node = audioSinkRef.current;
     if (!node) return;
     const element = track.attach();
     element.classList.add("graph-node-avatar-track");
-    if (track.kind === Track.Kind.Audio) {
-      element.autoplay = true;
+    element.classList.add("graph-node-avatar-audio-hidden");
+    element.dataset.kind = "audio";
+    element.autoplay = true;
+    element.playsInline = true;
+    element.controls = false;
+    element.preload = "auto";
+    element.muted = false;
+    element.volume = 1;
+    if (typeof element.play === "function") {
+      element.play().catch(() => {
+        // Autoplay can be blocked by browser policy; keep element attached regardless.
+      });
     }
     node.appendChild(element);
   };
@@ -471,7 +501,10 @@ function GraphCirclePanel({ graph = null }) {
         const response = await fetch(START_ENDPOINT, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent_id: selectedNodeId })
+          body: JSON.stringify({
+            agent_id: selectedNodeId,
+            context_override: avatarContextOverride || undefined,
+          })
         });
         if (!response.ok) {
           const detail = await response.text();
@@ -503,6 +536,18 @@ function GraphCirclePanel({ graph = null }) {
           return;
         }
 
+        // Match the proven tester behavior: publish local media so avatar agent can respond.
+        try {
+          await room.localParticipant.setMicrophoneEnabled(true);
+        } catch {
+          // Permission denied or unavailable; keep session alive for remote avatar playback.
+        }
+        try {
+          await room.localParticipant.setCameraEnabled(true);
+        } catch {
+          // Optional for this preview mode.
+        }
+
         room.remoteParticipants.forEach((participant) => {
           participant.trackPublications.forEach((publication) => {
             if (publication.isSubscribed && publication.track) {
@@ -527,7 +572,7 @@ function GraphCirclePanel({ graph = null }) {
       cancelled = true;
       disconnectAvatar();
     };
-  }, [selectedNodeId, selectedMappedAgent]);
+  }, [selectedNodeId, selectedMappedAgent, avatarContextOverride]);
 
   useEffect(() => {
     return () => disconnectAvatar();
@@ -971,7 +1016,18 @@ function GraphCirclePanel({ graph = null }) {
       >
         <div className="graph-node-terminal-scroll" ref={terminalScrollRef}>
           <div className="graph-node-avatar">
-            <div ref={mediaRef} className="graph-node-avatar-media" />
+            <div className="graph-node-avatar-media">
+              {selectedPortraitUrl ? (
+                <img
+                  key={selectedPortraitUrl}
+                  src={selectedPortraitUrl}
+                  alt={`Portrait of ${selectedNodeId}`}
+                  className="graph-node-portrait-image"
+                  loading="lazy"
+                />
+              ) : null}
+            </div>
+            <div ref={audioSinkRef} />
             <p className="graph-node-avatar-status">{avatarStatus}</p>
             {avatarError ? <p className="graph-node-avatar-error">{avatarError}</p> : null}
             {selectedMappedAgent ? (

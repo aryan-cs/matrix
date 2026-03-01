@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 
@@ -49,6 +49,10 @@ DEFAULT_AGENTS_CSV_PATH = Path(__file__).resolve().parent.parent / "backend-test
 DEFAULT_AGENT_TO_AVATAR_PATH = (
     Path(__file__).resolve().parent.parent / "avatars" / "agent_to_avatar.json"
 )
+DEFAULT_PORTRAITS_INDEX_PATH = (
+    Path(__file__).resolve().parent.parent / "backend-test" / "out_images" / "index.json"
+)
+DEFAULT_PORTRAITS_DIR = Path(__file__).resolve().parent.parent / "backend-test" / "out_images"
 
 
 class GraphBuildRequest(BaseModel):
@@ -97,6 +101,7 @@ class SaveGeneratedCsvResponse(BaseModel):
     saved_path: str
     row_count: int
     avatar_mapping_path: str
+    portraits_index_path: str | None = None
 
 
 class AvatarAgentSummary(BaseModel):
@@ -115,6 +120,7 @@ class AvatarAgentsResponse(BaseModel):
 
 class AvatarSessionStartRequest(BaseModel):
     agent_id: str = Field(..., min_length=1)
+    context_override: str | None = None
 
 
 class AvatarSessionStartResponse(BaseModel):
@@ -390,6 +396,57 @@ def _pick_avatars_script_path() -> Path:
 def _agent_mapping_path() -> Path:
     configured = os.getenv("AGENT_TO_AVATAR_JSON", str(DEFAULT_AGENT_TO_AVATAR_PATH)).strip()
     return Path(configured)
+
+
+def _portraits_script_path() -> Path:
+    default_script = Path(__file__).resolve().parent.parent / "backend-test" / "gen_portraits.py"
+    configured = os.getenv("GENERATE_PORTRAITS_SCRIPT", str(default_script)).strip()
+    return Path(configured)
+
+
+def _portraits_index_path() -> Path:
+    configured = os.getenv("PORTRAITS_INDEX_JSON", str(DEFAULT_PORTRAITS_INDEX_PATH)).strip()
+    return Path(configured)
+
+
+def _portraits_dir() -> Path:
+    configured = os.getenv("PORTRAITS_DIR", str(DEFAULT_PORTRAITS_DIR)).strip()
+    return Path(configured)
+
+
+def _resolve_portrait_path(agent_id: str) -> Path:
+    aid = str(agent_id or "").strip()
+    if not aid:
+        raise ValueError("agent_id is required.")
+
+    index_path = _portraits_index_path()
+    if index_path.exists():
+        try:
+            parsed = json.loads(index_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Portrait index JSON is invalid: {index_path}") from exc
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("agent_id", "")).strip() != aid:
+                    continue
+                raw_path = str(item.get("image_path", "")).strip()
+                if not raw_path:
+                    continue
+                candidate = Path(raw_path)
+                if not candidate.is_absolute():
+                    candidate = (index_path.parent / candidate).resolve()
+                if candidate.exists():
+                    return candidate
+
+    portraits_dir = _portraits_dir()
+    for ext in ("webp", "png", "jpg", "jpeg"):
+        candidate = portraits_dir / f"{aid}.{ext}"
+        if candidate.exists():
+            return candidate
+
+    raise ValueError(f"Portrait image not found for agent_id: {aid}")
 
 
 def _liveavatar_base_url() -> str:
@@ -743,6 +800,36 @@ def _refresh_agent_avatar_mapping(agents_csv_path: Path) -> Path:
     return output_mapping_path
 
 
+def _refresh_agent_portraits(agents_csv_path: Path) -> Path:
+    script_path = _portraits_script_path()
+    if not script_path.exists():
+        raise ValueError(f"Portrait generator script not found: {script_path}")
+
+    output_index_path = _portraits_index_path()
+    output_dir = _portraits_dir()
+    env = os.environ.copy()
+    env["PORTRAITS_CSV_PATH"] = str(agents_csv_path)
+    env["PORTRAITS_OUT_DIR"] = str(output_dir)
+    env["PORTRAITS_LIMIT"] = ""
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        preview = details[:500] if details else "No script output captured."
+        raise ValueError(f"Portrait generation failed: {preview}")
+
+    if not output_index_path.exists():
+        raise ValueError(f"Portrait index file was not produced: {output_index_path}")
+    return output_index_path
+
+
 def build_social_graph(csv_text: str, directed: bool = False) -> GraphBuildResponse:
     _fieldnames, rows = _parse_csv_rows(csv_text)
 
@@ -962,6 +1049,7 @@ async def planner_context_stream(
 
 @app.post("/api/agents/generated-csv", response_model=SaveGeneratedCsvResponse)
 async def save_generated_agents_csv(payload: SaveGeneratedCsvRequest) -> SaveGeneratedCsvResponse:
+    portraits_index_path: Path | None = None
     try:
         output_path, row_count = _write_generated_agents_csv(payload.csv_text)
         mapping_path = _refresh_agent_avatar_mapping(output_path)
@@ -969,12 +1057,26 @@ async def save_generated_agents_csv(payload: SaveGeneratedCsvRequest) -> SaveGen
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to write CSV file: {exc}") from exc
+    try:
+        portraits_index_path = _refresh_agent_portraits(output_path)
+    except ValueError as exc:
+        print(f"[WARN] Portrait generation skipped: {exc}")
 
     return SaveGeneratedCsvResponse(
         saved_path=str(output_path),
         row_count=row_count,
         avatar_mapping_path=str(mapping_path),
+        portraits_index_path=str(portraits_index_path) if portraits_index_path else None,
     )
+
+
+@app.get("/api/portrait/{agent_id}")
+async def portrait_image(agent_id: str):
+    try:
+        image_path = _resolve_portrait_path(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=image_path)
 
 
 @app.get("/api/avatar/agents", response_model=AvatarAgentsResponse)
@@ -1022,6 +1124,7 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
     agent = agents_by_id.get(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent_id: {agent_id}")
+    effective_system_prompt = str(payload.context_override or "").strip() or agent.get("system_prompt", "")
 
     mapped = mapping.get(agent_id)
     if not isinstance(mapped, dict):
@@ -1036,7 +1139,9 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
 
     try:
         if mode == "FULL":
-            context_id = _resolve_context_id_for_agent(agent_id=agent_id, agent=agent)
+            effective_agent = dict(agent)
+            effective_agent["system_prompt"] = effective_system_prompt
+            context_id = _resolve_context_id_for_agent(agent_id=agent_id, agent=effective_agent)
             if not context_id:
                 raise ValueError(f"No context_id resolved for FULL mode (agent_id={agent_id}).")
 
@@ -1080,7 +1185,7 @@ async def avatar_session_start(payload: AvatarSessionStartRequest) -> AvatarSess
         livekit_client_token=livekit_client_token,
         livekit_agent_token=livekit_agent_token,
         session_id=session_id,
-        system_prompt=agent.get("system_prompt", ""),
+        system_prompt=effective_system_prompt,
     )
 
 
