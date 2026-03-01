@@ -1,9 +1,17 @@
 import os
 import json
 import time
+import csv
 from pathlib import Path
-import pandas as pd
-import requests
+
+try:
+    import pandas as pd
+except Exception:  # pragma: no cover - optional dependency
+    pd = None
+try:
+    import requests
+except Exception:  # pragma: no cover - optional dependency
+    requests = None
 
 # ---------- Inputs ----------
 HERE = Path(__file__).resolve().parent
@@ -195,6 +203,9 @@ def fallback_pick_avatar(agent: dict, candidates: list[dict]) -> dict:
     return deterministic_pick_avatar(agent, candidates)
 
 def modal_chat_json(messages, response_format=None, max_tokens=300):
+    if requests is None:
+        raise RuntimeError("requests is required when USE_MODAL_PICKER=1.")
+
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"
@@ -305,21 +316,29 @@ def pick_avatar(agent: dict, candidates: list[dict]) -> dict:
 
     return obj
 
+
+def iter_agent_rows(csv_path: Path) -> list[dict]:
+    if pd is not None:
+        df = pd.read_csv(csv_path)
+        return [r.to_dict() for _, r in df.iterrows()]
+
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
 def main():
     print(f"Using agents CSV: {AGENTS_CSV}")
     print(f"Using avatar catalog: {AVATAR_CATALOG_JSON}")
     print(f"Using model endpoint: {CHAT_URL}")
     print(f"Use Modal picker: {USE_MODAL_PICKER}")
 
-    df = pd.read_csv(AGENTS_CSV)
+    rows = iter_agent_rows(AGENTS_CSV)
     catalog = load_catalog()
 
     mapping = {}
     if OUT_MAP_JSON.exists():
         mapping = json.loads(OUT_MAP_JSON.read_text(encoding="utf-8"))
 
-    for _, r in df.iterrows():
-        row = r.to_dict()
+    for row in rows:
         agent_id = norm(row.get("agent_id"))
         if not agent_id or agent_id in mapping:
             continue

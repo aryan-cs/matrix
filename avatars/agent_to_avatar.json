@@ -1,0 +1,57 @@
+{
+  "TX-001": {
+    "avatar_id": "5c6e2257-bb91-48f4-a75d-d4c9ad212af9",
+    "avatar_name": "Rika in Blue Suit (Portrait)",
+    "default_voice_id": "b2bd6569-a537-4342-aeca-a1f15d2a2c97",
+    "default_voice_name": "Rika - IA",
+    "confidence": 0.45,
+    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
+    "agent_gender": "female",
+    "agent_age_bucket": "35-44",
+    "agent_ethnicity": "other"
+  },
+  "TX-002": {
+    "avatar_id": "0930fd59-c8ad-434d-ad53-b391a1768720",
+    "avatar_name": "Dexter Lawyer",
+    "default_voice_id": "b952f553-f7f3-4e52-8625-86b4c415384f",
+    "default_voice_name": "Dexter - Professional",
+    "confidence": 0.85,
+    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
+    "agent_gender": "male",
+    "agent_age_bucket": "55-64",
+    "agent_ethnicity": "white"
+  },
+  "TX-003": {
+    "avatar_id": "5c6e2257-bb91-48f4-a75d-d4c9ad212af9",
+    "avatar_name": "Rika in Blue Suit (Portrait)",
+    "default_voice_id": "b2bd6569-a537-4342-aeca-a1f15d2a2c97",
+    "default_voice_name": "Rika - IA",
+    "confidence": 0.45,
+    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
+    "agent_gender": "female",
+    "agent_age_bucket": "35-44",
+    "agent_ethnicity": "other"
+  },
+  "TX-004": {
+    "avatar_id": "dd73ea75-1218-4ef3-92ce-606d5f7fbc0a",
+    "avatar_name": "Wayne",
+    "default_voice_id": "c2527536-6d1f-4412-a643-53a3497dada9",
+    "default_voice_name": "Wayne Liang",
+    "confidence": 0.45,
+    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
+    "agent_gender": "male",
+    "agent_age_bucket": "45-54",
+    "agent_ethnicity": "other"
+  },
+  "TX-005": {
+    "avatar_id": "69cf601f-b35b-4d1b-a701-c854d223b5a5",
+    "avatar_name": "Katya in Pink Suit (Portrait)",
+    "default_voice_id": "864a26b8-bfba-4435-9cc5-1dd593de5ca7",
+    "default_voice_name": "Katya - IA",
+    "confidence": 0.85,
+    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
+    "agent_gender": "female",
+    "agent_age_bucket": "25-34",
+    "agent_ethnicity": "white"
+  }
+}

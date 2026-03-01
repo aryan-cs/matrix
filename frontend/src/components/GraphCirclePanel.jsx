@@ -1,4 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Room, RoomEvent, Track } from "livekit-client";
+
+const AGENTS_ENDPOINT = "/api/avatar/agents";
+const START_ENDPOINT = "/api/avatar/session/start";
 
 function clampNodeRadius(count) {
   if (count <= 12) return 18;
@@ -167,10 +171,15 @@ function clamp(value, min, max) {
 
 function GraphCirclePanel({ graph = null }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [mappedAgentsById, setMappedAgentsById] = useState({});
+  const [avatarStatus, setAvatarStatus] = useState("Select a node to preview avatar.");
+  const [avatarError, setAvatarError] = useState("");
   const selectedNodeIdRef = useRef("");
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
+  const roomRef = useRef(null);
+  const mediaRef = useRef(null);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -191,6 +200,64 @@ function GraphCirclePanel({ graph = null }) {
     const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) : null;
     return buildDetailRows(selectedNode, nodeById, adjacencyById);
   }, [selectedNodeId, nodeById, adjacencyById]);
+  const selectedMappedAgent = useMemo(() => {
+    if (!selectedNodeId) return null;
+    return mappedAgentsById[selectedNodeId] || null;
+  }, [selectedNodeId, mappedAgentsById]);
+
+  const clearMedia = () => {
+    const node = mediaRef.current;
+    if (!node) return;
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  };
+
+  const disconnectAvatar = () => {
+    if (roomRef.current) {
+      roomRef.current.disconnect();
+      roomRef.current = null;
+    }
+    clearMedia();
+  };
+
+  const attachTrack = (track) => {
+    const node = mediaRef.current;
+    if (!node) return;
+    const element = track.attach();
+    element.classList.add("graph-node-avatar-track");
+    if (track.kind === Track.Kind.Audio) {
+      element.autoplay = true;
+    }
+    node.appendChild(element);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadMappedAgents = async () => {
+      try {
+        const response = await fetch(AGENTS_ENDPOINT);
+        if (!response.ok) return;
+        const data = await response.json();
+        const list = Array.isArray(data?.agents) ? data.agents : [];
+        const byId = {};
+        for (const item of list) {
+          const id = String(item?.agent_id || "").trim();
+          if (!id) continue;
+          byId[id] = item;
+        }
+        if (!cancelled) {
+          setMappedAgentsById(byId);
+        }
+      } catch {
+        // Keep graph behavior unchanged if avatar endpoints are unavailable.
+      }
+    };
+    loadMappedAgents();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -201,6 +268,93 @@ function GraphCirclePanel({ graph = null }) {
       setSelectedNodeId("");
     }
   }, [selectedNodeId, nodeById]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const startAvatarForSelectedNode = async () => {
+      if (!selectedNodeId) {
+        disconnectAvatar();
+        setAvatarError("");
+        setAvatarStatus("Select a node to preview avatar.");
+        return;
+      }
+
+      if (!selectedMappedAgent) {
+        disconnectAvatar();
+        setAvatarError("");
+        setAvatarStatus(`No avatar mapping found for ${selectedNodeId}.`);
+        return;
+      }
+
+      disconnectAvatar();
+      setAvatarError("");
+      setAvatarStatus(`Starting avatar for ${selectedNodeId}...`);
+
+      try {
+        const response = await fetch(START_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent_id: selectedNodeId })
+        });
+        if (!response.ok) {
+          const detail = await response.text();
+          throw new Error(`Session start failed (${response.status}): ${detail}`);
+        }
+
+        const started = await response.json();
+        if (cancelled) return;
+
+        const room = new Room({ adaptiveStream: true, dynacast: true });
+        room.on(RoomEvent.TrackSubscribed, (track) => attachTrack(track));
+        room.on(RoomEvent.TrackUnsubscribed, (track) => {
+          track.detach().forEach((el) => el.remove());
+        });
+        room.on(RoomEvent.ConnectionStateChanged, (state) => {
+          if (!cancelled) {
+            setAvatarStatus(`Avatar connection: ${state}`);
+          }
+        });
+        room.on(RoomEvent.Disconnected, () => {
+          if (!cancelled) {
+            setAvatarStatus("Avatar disconnected.");
+          }
+        });
+
+        await room.connect(started.livekit_url, started.livekit_client_token);
+        if (cancelled) {
+          room.disconnect();
+          return;
+        }
+
+        room.remoteParticipants.forEach((participant) => {
+          participant.trackPublications.forEach((publication) => {
+            if (publication.isSubscribed && publication.track) {
+              attachTrack(publication.track);
+            }
+          });
+        });
+        roomRef.current = room;
+        setAvatarStatus(`Avatar ready for ${selectedNodeId}.`);
+      } catch (error) {
+        if (cancelled) return;
+        disconnectAvatar();
+        setAvatarError(error instanceof Error ? error.message : "Could not start avatar.");
+        setAvatarStatus("Avatar failed to start.");
+      }
+    };
+
+    startAvatarForSelectedNode();
+
+    return () => {
+      cancelled = true;
+      disconnectAvatar();
+    };
+  }, [selectedNodeId, selectedMappedAgent]);
+
+  useEffect(() => {
+    return () => disconnectAvatar();
+  }, []);
 
   useEffect(() => {
     const stageNode = stageRef.current;
@@ -543,6 +697,16 @@ function GraphCirclePanel({ graph = null }) {
       </div>
       {selectedNodeId ? (
         <div className="graph-node-inspector active">
+          <div className="graph-node-avatar">
+            <div ref={mediaRef} className="graph-node-avatar-media" />
+            <p className="graph-node-avatar-status">{avatarStatus}</p>
+            {avatarError ? <p className="graph-node-avatar-error">{avatarError}</p> : null}
+            {selectedMappedAgent ? (
+              <p className="graph-node-avatar-meta">
+                {selectedMappedAgent.avatar_name} ({selectedMappedAgent.avatar_id})
+              </p>
+            ) : null}
+          </div>
           <dl className="graph-node-inspector-grid">
             {detailTargetRows.map((row, index) =>
               row.label === "__name__" ? (

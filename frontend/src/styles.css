@@ -148,11 +148,57 @@ input {
   min-height: 150px;
   padding: 14px 16px 14px;
   display: flex;
+  flex-direction: column;
+  gap: 10px;
   align-items: flex-start;
-  pointer-events: none;
+  pointer-events: auto;
   overflow: auto;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(0, 0, 0, 0.9);
+}
+
+.graph-node-avatar {
+  width: 100%;
+  display: grid;
+  gap: 5px;
+}
+
+.graph-node-avatar-media {
+  width: min(100%, 340px);
+  min-height: 150px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+
+.graph-node-avatar-track {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.graph-node-avatar-status {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.graph-node-avatar-error {
+  margin: 0;
+  color: #ff9a9a;
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.graph-node-avatar-meta {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 .graph-node-inspector-grid {
