@@ -13,55 +13,55 @@
     "agent_ethnicity": "white"
   },
   "TX-002": {
-    "live_video_enabled": true,
-    "live_avatar_enabled": true,
-    "avatar_id": "9a5a4cb2-a32e-415f-8689-aa9d61acee1b",
-    "avatar_name": "Pedro in Blue Shirt (Portrait)",
-    "default_voice_id": "98a984cd-5f25-49b1-8844-2195c3d50e0f",
-    "default_voice_name": "Pedro - IA",
-    "confidence": 0.85,
-    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
-    "agent_gender": "male",
-    "agent_age_bucket": "35-44",
-    "agent_ethnicity": "latinx"
-  },
-  "TX-003": {
-    "live_video_enabled": true,
-    "live_avatar_enabled": true,
-    "avatar_id": "9d4d6cdd-38a1-448e-a336-1ac682ba6a27",
-    "avatar_name": "Marianne in Red Suit (Portrait)",
-    "default_voice_id": "8a504f9b-95dd-42d4-8b0c-edc2567b6382",
-    "default_voice_name": "Marianne - IA",
-    "confidence": 0.85,
-    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
-    "agent_gender": "female",
-    "agent_age_bucket": "55-64",
-    "agent_ethnicity": "white"
-  },
-  "TX-004": {
     "live_video_enabled": false,
     "live_avatar_enabled": false,
     "avatar_id": "dd73ea75-1218-4ef3-92ce-606d5f7fbc0a",
     "avatar_name": "Wayne",
     "default_voice_id": "c2527536-6d1f-4412-a643-53a3497dada9",
     "default_voice_name": "Wayne Liang",
-    "confidence": 0.85,
+    "confidence": 0.45,
     "reason": "Voice assigned. Live video disabled because no unassigned strict match; using generated photo.",
     "agent_gender": "male",
-    "agent_age_bucket": "25-34",
-    "agent_ethnicity": "asian"
+    "agent_age_bucket": "45-54",
+    "agent_ethnicity": "other"
+  },
+  "TX-003": {
+    "live_video_enabled": false,
+    "live_avatar_enabled": false,
+    "avatar_id": "5c6e2257-bb91-48f4-a75d-d4c9ad212af9",
+    "avatar_name": "Rika in Blue Suit (Portrait)",
+    "default_voice_id": "b2bd6569-a537-4342-aeca-a1f15d2a2c97",
+    "default_voice_name": "Rika - IA",
+    "confidence": 0.45,
+    "reason": "Voice assigned. Live video disabled because no unassigned strict match; using generated photo.",
+    "agent_gender": "female",
+    "agent_age_bucket": "35-44",
+    "agent_ethnicity": "other"
+  },
+  "TX-004": {
+    "live_video_enabled": true,
+    "live_avatar_enabled": true,
+    "avatar_id": "0930fd59-c8ad-434d-ad53-b391a1768720",
+    "avatar_name": "Dexter Lawyer",
+    "default_voice_id": "b952f553-f7f3-4e52-8625-86b4c415384f",
+    "default_voice_name": "Dexter - Professional",
+    "confidence": 0.85,
+    "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
+    "agent_gender": "male",
+    "agent_age_bucket": "55-64",
+    "agent_ethnicity": "white"
   },
   "TX-005": {
     "live_video_enabled": false,
     "live_avatar_enabled": false,
-    "avatar_id": "65f9e3c9-d48b-4118-b73a-4ae2e3cbb8f0",
-    "avatar_name": "June HR",
-    "default_voice_id": "62bbb4b2-bb26-4727-bc87-cfb2bd4e0cc8",
-    "default_voice_name": "June - Lifelike",
-    "confidence": 0.85,
+    "avatar_id": "69cf601f-b35b-4d1b-a701-c854d223b5a5",
+    "avatar_name": "Katya in Pink Suit (Portrait)",
+    "default_voice_id": "864a26b8-bfba-4435-9cc5-1dd593de5ca7",
+    "default_voice_name": "Katya - IA",
+    "confidence": 0.45,
     "reason": "Voice assigned. Live video disabled because no unassigned strict match; using generated photo.",
     "agent_gender": "female",
-    "agent_age_bucket": "45-54",
-    "agent_ethnicity": "latinx"
+    "agent_age_bucket": "25-34",
+    "agent_ethnicity": "other"
   }
 }

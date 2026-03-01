@@ -1,6 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Room, RoomEvent, Track } from "livekit-client";
 import callIcon from "../../assets/icons/call.svg";
 import notesIcon from "../../assets/icons/notes.svg";
+
+const AVATAR_AGENTS_ENDPOINT = "/api/avatar/agents";
+const AVATAR_START_ENDPOINT = "/api/avatar/session/start";
 
 function clampNodeRadius(count) {
   if (count <= 12) return 18;
@@ -170,6 +174,70 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function buildAvatarContext(selectedNode, simulationEntry) {
+  const metadata =
+    selectedNode?.metadata && typeof selectedNode.metadata === "object"
+      ? selectedNode.metadata
+      : {};
+  const lines = [];
+  const name = selectedNode?.label || metadata.full_name || selectedNode?.id || "Unknown";
+  const agentId = selectedNode?.id || "";
+
+  lines.push(`You are ${name} (${agentId}). Stay fully in character at all times.`);
+  lines.push("These beliefs, experiences, and social ties are your own lived reality.");
+  lines.push("Speak in first person as this person, not as an analyst or narrator.");
+
+  const details = [
+    ["Age", metadata.age],
+    ["Gender", metadata.gender],
+    ["Ethnicity", metadata.ethnicity],
+    ["Political Lean", metadata.political_lean],
+    ["Education", metadata.education],
+    ["Occupation", metadata.occupation],
+    ["Location", metadata.home_address]
+  ]
+    .filter(([, value]) => String(value ?? "").trim())
+    .map(([label, value]) => `${label}: ${String(value).trim()}`);
+  if (details.length > 0) {
+    lines.push("");
+    lines.push("Profile:");
+    lines.push(...details);
+  }
+
+  if (simulationEntry) {
+    lines.push("");
+    lines.push("Simulation timeline:");
+    if (simulationEntry.initial) {
+      lines.push(`Day 0 (Initial): ${simulationEntry.initial}`);
+    }
+    if (Array.isArray(simulationEntry.days)) {
+      for (const day of simulationEntry.days) {
+        const dayIndex = Number(day?.day);
+        const dayLabel = Number.isFinite(dayIndex) ? `Day ${dayIndex + 1}` : "Day";
+        const talkedTo = Array.isArray(day?.talked_to) ? day.talked_to.filter(Boolean) : [];
+        if (talkedTo.length > 0) {
+          lines.push(`${dayLabel} talked to: ${talkedTo.join(", ")}`);
+        }
+        if (day?.content) {
+          lines.push(`${dayLabel} summary: ${day.content}`);
+        }
+      }
+    }
+    if (simulationEntry.final) {
+      lines.push(`Final position: ${simulationEntry.final}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("Conversation rules:");
+  lines.push("- Never say you are an AI, assistant, model, or that you are roleplaying.");
+  lines.push("- Never refer to 'the simulation', 'the provided context', or 'the report'.");
+  lines.push("- Express values, concerns, and decisions as your own personal views.");
+  lines.push("- Keep tone natural and human; use concrete details from your life and relationships when relevant.");
+  lines.push("- Respond conversationally in 2-4 sentences unless asked for detail.");
+  return lines.join("\n");
+}
+
 function SimulationJourney({ data }) {
   if (!data || !data.days || data.days.length === 0) return null;
   const [expandedDay, setExpandedDay] = useState(-1);
@@ -229,10 +297,21 @@ function SimulationJourney({ data }) {
 function GraphCirclePanel({ graph = null, simulationData = null, simulationStatus = null }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [journeyModalOpen, setJourneyModalOpen] = useState(false);
+  const [avatarAgents, setAvatarAgents] = useState([]);
+  const [callCardOpen, setCallCardOpen] = useState(false);
+  const [activeCallAgentId, setActiveCallAgentId] = useState("");
+  const [callStatus, setCallStatus] = useState("");
+  const [callError, setCallError] = useState("");
+  const [isStartingCall, setIsStartingCall] = useState(false);
+  const [useVideoFeed, setUseVideoFeed] = useState(false);
+  const [portraitFailed, setPortraitFailed] = useState(false);
   const selectedNodeIdRef = useRef("");
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
+  const roomRef = useRef(null);
+  const videoHostRef = useRef(null);
+  const audioHostRef = useRef(null);
   const graphData = useMemo(() => normalizeGraphData(graph), [graph]);
   const nodeById = useMemo(
     () => new Map(graphData.nodes.map((node) => [node.id, node])),
@@ -262,6 +341,55 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
     const midpoint = Math.ceil(selectedNodeDetails.length / 2);
     return [selectedNodeDetails.slice(0, midpoint), selectedNodeDetails.slice(midpoint)];
   }, [selectedNodeDetails]);
+  const avatarAgentById = useMemo(
+    () => new Map((Array.isArray(avatarAgents) ? avatarAgents : []).map((agent) => [agent.agent_id, agent])),
+    [avatarAgents]
+  );
+  const selectedSimulation = selectedNodeId ? simulationData?.[selectedNodeId] ?? null : null;
+  const selectedAvatarAgent = selectedNodeId ? avatarAgentById.get(selectedNodeId) ?? null : null;
+  const activePortraitSrc = activeCallAgentId ? `/api/portrait/${encodeURIComponent(activeCallAgentId)}` : "";
+  const loadAvatarAgents = useCallback(async () => {
+    try {
+      const response = await fetch(AVATAR_AGENTS_ENDPOINT);
+      if (!response.ok) {
+        setAvatarAgents([]);
+        return;
+      }
+      const payload = await response.json();
+      setAvatarAgents(Array.isArray(payload?.agents) ? payload.agents : []);
+    } catch {
+      setAvatarAgents([]);
+    }
+  }, []);
+
+  const clearMediaHosts = () => {
+    const videoHost = videoHostRef.current;
+    if (videoHost) {
+      while (videoHost.firstChild) {
+        videoHost.removeChild(videoHost.firstChild);
+      }
+    }
+    const audioHost = audioHostRef.current;
+    if (audioHost) {
+      while (audioHost.firstChild) {
+        audioHost.removeChild(audioHost.firstChild);
+      }
+    }
+  };
+
+  const disconnectCall = () => {
+    const room = roomRef.current;
+    if (room) {
+      room.disconnect();
+      roomRef.current = null;
+    }
+    clearMediaHosts();
+    setCallCardOpen(false);
+    setActiveCallAgentId("");
+    setCallStatus("");
+    setCallError("");
+    setPortraitFailed(false);
+  };
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -269,10 +397,28 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
   }, [selectedNodeId]);
 
   useEffect(() => {
+    // Only one active call at a time: changing to a different node closes the current call.
+    if (!activeCallAgentId || !selectedNodeId) return;
+    if (selectedNodeId === activeCallAgentId) return;
+    disconnectCall();
+  }, [selectedNodeId, activeCallAgentId]);
+
+  useEffect(() => {
     if (selectedNodeId && !nodeById.has(selectedNodeId)) {
       setSelectedNodeId("");
     }
   }, [selectedNodeId, nodeById]);
+
+  useEffect(() => {
+    void loadAvatarAgents();
+  }, [loadAvatarAgents]);
+
+  useEffect(() => {
+    if (simulationStatus?.state !== "done") return;
+    void loadAvatarAgents();
+  }, [simulationStatus?.state, graphData.nodes.length, loadAvatarAgents]);
+
+  useEffect(() => () => disconnectCall(), []);
 
   useEffect(() => {
     const stageNode = stageRef.current;
@@ -624,6 +770,107 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
   const simDone = simulationStatus?.state === "done";
   const simDay = simulationStatus?.day || 0;
   const simBarFill = simRunning ? Math.round((simDay / 5) * 100) : simDone ? 100 : 0;
+  const canCallSelectedNode = Boolean(simDone && selectedNodeId && selectedSimulation && selectedAvatarAgent);
+
+  const attachTrack = (track, shouldShowVideo) => {
+    if (track.kind === Track.Kind.Video) {
+      if (!shouldShowVideo) return;
+      const videoHost = videoHostRef.current;
+      if (!videoHost) return;
+      const element = track.attach();
+      element.classList.add("graph-call-card-track");
+      videoHost.appendChild(element);
+      return;
+    }
+    if (track.kind === Track.Kind.Audio) {
+      const audioHost = audioHostRef.current;
+      if (!audioHost) return;
+      const element = track.attach();
+      element.classList.add("graph-call-card-audio");
+      element.autoplay = true;
+      element.controls = false;
+      element.muted = false;
+      audioHost.appendChild(element);
+    }
+  };
+
+  const handleStartCall = async () => {
+    if (!canCallSelectedNode || !selectedNode) return;
+    const simulationReportForNode = simulationData?.[selectedNode.id];
+    if (!simulationReportForNode) return;
+    setIsStartingCall(true);
+    setCallError("");
+    setPortraitFailed(false);
+    setCallCardOpen(true);
+    setActiveCallAgentId(selectedNode.id);
+    clearMediaHosts();
+    if (roomRef.current) {
+      roomRef.current.disconnect();
+      roomRef.current = null;
+    }
+
+    const personName = selectedNode.label || selectedNode.id;
+    setCallStatus(`${personName} is connecting…`);
+
+    try {
+      // Context uses this node's generated simulation report (same source as the report/journey button).
+      const contextOverride = buildAvatarContext(selectedNode, simulationReportForNode);
+      const response = await fetch(AVATAR_START_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent_id: selectedNode.id,
+          context_override: contextOverride
+        })
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(`Call start failed (${response.status}): ${detail}`);
+      }
+      const started = await response.json();
+      const shouldShowVideo = Boolean(selectedAvatarAgent?.live_video_enabled);
+      setUseVideoFeed(shouldShowVideo);
+
+      const room = new Room({ adaptiveStream: true, dynacast: true });
+      room.on(RoomEvent.TrackSubscribed, (track) => attachTrack(track, shouldShowVideo));
+      room.on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach().forEach((el) => el.remove());
+      });
+      room.on(RoomEvent.ConnectionStateChanged, (state) => {
+        if (state === "connected") {
+          setCallStatus(`${personName} is live`);
+        } else if (state === "connecting") {
+          setCallStatus(`${personName} is connecting…`);
+        } else if (state === "disconnected") {
+          setCallStatus(`${personName} disconnected`);
+        }
+      });
+      await room.connect(started.livekit_url, started.livekit_client_token);
+      try {
+        await room.localParticipant.setMicrophoneEnabled(true);
+      } catch {
+        // Keep call active even if browser blocks mic access.
+      }
+      try {
+        await room.localParticipant.setCameraEnabled(false);
+      } catch {
+        // Ignore camera disable errors.
+      }
+      room.remoteParticipants.forEach((participant) => {
+        participant.trackPublications.forEach((publication) => {
+          if (publication.isSubscribed && publication.track) {
+            attachTrack(publication.track, shouldShowVideo);
+          }
+        });
+      });
+      roomRef.current = room;
+    } catch (error) {
+      setCallError(error instanceof Error ? error.message : "Could not start call.");
+      setCallStatus(`${personName} could not connect`);
+    } finally {
+      setIsStartingCall(false);
+    }
+  };
 
   return (
     <div className={`graph-circle-canvas ${isTerminalOpen ? "terminal-open" : ""}`}>
@@ -652,8 +899,19 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
           type="button"
           className={`graph-panel-fab ${!simDone ? "sim-locked" : ""}`}
           aria-label="Call"
-          disabled={!simDone}
-          title={!simDone ? "Available after simulation completes" : "Call"}
+          disabled={!canCallSelectedNode || isStartingCall}
+          title={
+            !simDone
+              ? "Available after simulation completes"
+              : !selectedNodeId
+                ? "Select a person first"
+                : !selectedSimulation
+                  ? "No simulation report for this person"
+                  : !selectedAvatarAgent
+                    ? "No avatar mapping for this person"
+                    : "Call"
+          }
+          onClick={handleStartCall}
         >
           <img src={callIcon} alt="" />
         </button>
@@ -736,6 +994,46 @@ function GraphCirclePanel({ graph = null, simulationData = null, simulationStatu
               <SimulationJourney data={simulationData[selectedNodeId]} />
             </div>
           </div>
+        </div>
+      )}
+
+      {callCardOpen && activeCallAgentId && (
+        <div className="graph-call-card" role="dialog" aria-label="Agent call card">
+          <div className="graph-call-card-header">
+            <span className="graph-call-card-name">
+              {nodeById.get(activeCallAgentId)?.label || activeCallAgentId}
+            </span>
+            <button
+              type="button"
+              className="graph-call-card-close"
+              onClick={disconnectCall}
+              aria-label="End call"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="graph-call-card-media">
+            {useVideoFeed ? (
+              <div ref={videoHostRef} className="graph-call-card-video-host" />
+            ) : (
+              !portraitFailed ? (
+                <img
+                  src={activePortraitSrc}
+                  alt={nodeById.get(activeCallAgentId)?.label || activeCallAgentId}
+                  className="graph-call-card-photo"
+                  onError={() => setPortraitFailed(true)}
+                />
+              ) : null
+            )}
+            {!useVideoFeed && portraitFailed ? (
+              <div className="graph-call-card-photo-fallback">
+                {nodeById.get(activeCallAgentId)?.label || activeCallAgentId}
+              </div>
+            ) : null}
+          </div>
+          <p className="graph-call-card-status">{callStatus}</p>
+          {callError ? <p className="graph-call-card-error">{callError}</p> : null}
+          <div ref={audioHostRef} className="graph-call-card-audio-host" />
         </div>
       )}
     </div>

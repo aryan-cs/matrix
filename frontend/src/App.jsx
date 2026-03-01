@@ -2302,8 +2302,44 @@ function App() {
     };
   }, []);
 
-  const handleRunSimulation = async () => {
+  const prepareCsvForSimulation = async (csvPayload) => {
+    const normalizedCsv = String(csvPayload || "").trim();
+    if (!normalizedCsv) {
+      throw new Error("No generated CSV is available to save before simulation.");
+    }
+    const response = await fetch("/api/agents/generated-csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ csv_text: normalizedCsv })
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`CSV save/script pipeline failed (${response.status}): ${detail}`);
+    }
+    return response.json();
+  };
+
+  const handleRunSimulation = async (csvPayload = "") => {
     if (simulationStatus?.state === "running") return;
+    const normalizedCsv = String(csvPayload || "").trim();
+    if (normalizedCsv) {
+      try {
+        await prepareCsvForSimulation(normalizedCsv);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Unknown CSV preparation error";
+        setSimulationStatus({ state: "error", progress: 0, total: 0, day: 0, error: detail });
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: createRuntimeId("assistant"),
+            role: "assistant",
+            content: `Could not start simulation because CSV prep failed.\n${detail}`,
+            error: true
+          }
+        ]);
+        return;
+      }
+    }
     setSimulationData(null);
     setSimulationStatus({ state: "running", progress: 0, total: 0, day: 0 });
     try {
@@ -3055,17 +3091,18 @@ function App() {
     if (editState) {
       if (!promptText) return;
       const userTurn = { id: createRuntimeId("user"), role: "user", content: promptText };
-      const noChangesPattern = /^(no|no changes?|looks? good|proceed|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah)\b/i;
+      const noChangesPattern = /^(no|no changes?|looks? good|proceed|continue(?: as is)?|go ahead|start(?: simulation)?|done|fine|ok(ay)?|that'?s? (good|fine|great|perfect)|all good|perfect|nope|nah|as is|whatever)\b/i;
       if (noChangesPattern.test(promptText.trim())) {
-      setEditState(null);
-      setScenarioText("");
-      scenarioTextRef.current = "";
-      setChatMessages((prev) => [
+        const csvPayloadForSimulation = String(editState?.csvPayload || "").trim();
+        setEditState(null);
+        setScenarioText("");
+        scenarioTextRef.current = "";
+        setChatMessages((prev) => [
           ...prev,
           userTurn,
-          { id: createRuntimeId("assistant"), role: "assistant", content: "Simulation started! Your agents are now active in the Matrix." }
+          { id: createRuntimeId("assistant"), role: "assistant", content: "Starting simulation and preparing agent assets..." }
         ]);
-        handleRunSimulation();
+        void handleRunSimulation(csvPayloadForSimulation);
         return;
       }
 

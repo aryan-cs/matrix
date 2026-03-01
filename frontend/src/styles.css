@@ -112,7 +112,7 @@ input {
   height: 100%;
   width: 100%;
   display: block;
-  background: transparent;
+  background: #050505;
   box-shadow: none;
   border-radius: 0;
   transform: translateY(0);
@@ -143,6 +143,7 @@ input {
   width: 100%;
   height: 100%;
   display: block;
+  background: #050505;
   cursor: grab;
 }
 
@@ -200,6 +201,18 @@ input {
   object-position: center;
   pointer-events: none;
 }
+
+.graph-panel-fab-stack {
+  position: absolute;
+  right: 12px;
+  top: 52%;
+  transform: translateY(-50%);
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .graph-node-terminal {
   position: absolute;
   left: 0;
@@ -222,6 +235,52 @@ input {
     transform 720ms var(--ease-slingshot),
     opacity 260ms var(--ease-soft);
   will-change: transform, opacity;
+}
+
+.graph-node-terminal-profile {
+  display: grid;
+  gap: 10px;
+}
+
+.graph-node-terminal-name {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: rgba(242, 242, 242, 0.96);
+  line-height: 1.25;
+}
+
+.graph-node-terminal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+.graph-node-terminal-column {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+}
+
+.graph-node-terminal-row {
+  display: grid;
+  gap: 2px;
+}
+
+.graph-node-terminal-key {
+  font-size: 0.66rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.44);
+}
+
+.graph-node-terminal-value {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: rgba(240, 240, 240, 0.92);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .graph-node-terminal.open {
@@ -641,6 +700,120 @@ input {
   font-size: 0.76rem;
   color: rgba(255, 255, 255, 0.3);
   font-style: italic;
+}
+
+.graph-call-card {
+  position: absolute;
+  top: 14px;
+  right: 12px;
+  width: min(290px, calc(100% - 24px));
+  border-radius: 14px;
+  padding: 10px;
+  background: rgba(10, 10, 10, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.42);
+  z-index: 10;
+  display: grid;
+  gap: 8px;
+}
+
+.graph-call-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.graph-call-card-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: rgba(246, 246, 246, 0.96);
+  line-height: 1.2;
+}
+
+.graph-call-card-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.9);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.graph-call-card-media {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.graph-call-card-video-host {
+  width: 100%;
+  height: 100%;
+}
+
+.graph-call-card-track {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  background: #000;
+}
+
+.graph-call-card-photo {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.graph-call-card-photo-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 10px;
+  font-size: 0.82rem;
+  color: rgba(240, 240, 240, 0.88);
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.graph-call-card-status {
+  margin: 0;
+  font-size: 0.74rem;
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.graph-call-card-error {
+  margin: 0;
+  font-size: 0.72rem;
+  color: #ffb0b0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.graph-call-card-audio-host {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.graph-call-card-audio {
+  width: 1px;
+  height: 1px;
 }
 
 @keyframes graph-panel-sling-in {
