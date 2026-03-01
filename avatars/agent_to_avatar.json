@@ -26,32 +26,32 @@
     "avatar_name": "Katya in Pink Suit (Portrait)",
     "default_voice_id": "864a26b8-bfba-4435-9cc5-1dd593de5ca7",
     "default_voice_name": "Katya - IA",
-    "confidence": 0.85,
+    "confidence": 0.45,
     "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
     "agent_gender": "female",
     "agent_age_bucket": "25-34",
-    "agent_ethnicity": "white"
+    "agent_ethnicity": "other"
   },
   "TX-004": {
     "avatar_id": "0930fd59-c8ad-434d-ad53-b391a1768720",
     "avatar_name": "Dexter Lawyer",
     "default_voice_id": "b952f553-f7f3-4e52-8625-86b4c415384f",
     "default_voice_name": "Dexter - Professional",
-    "confidence": 0.45,
+    "confidence": 0.85,
     "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
     "agent_gender": "male",
     "agent_age_bucket": "55-64",
-    "agent_ethnicity": "other"
+    "agent_ethnicity": "white"
   },
   "TX-005": {
-    "avatar_id": "65f9e3c9-d48b-4118-b73a-4ae2e3cbb8f0",
-    "avatar_name": "June HR",
-    "default_voice_id": "62bbb4b2-bb26-4727-bc87-cfb2bd4e0cc8",
-    "default_voice_name": "June - Lifelike",
+    "avatar_id": "8175dfc2-7858-49d6-b5fa-0c135d1c4bad",
+    "avatar_name": "Elenora Tech Expert",
+    "default_voice_id": "254ffe1e-c89f-430f-8c36-9e7611d310c0",
+    "default_voice_name": "Elenora - Professional",
     "confidence": 0.85,
     "reason": "Deterministic pick: gender matched first, then ethnicity, then age, with role-tag tie-breaker.",
     "agent_gender": "female",
-    "agent_age_bucket": "18-24",
-    "agent_ethnicity": "asian"
+    "agent_age_bucket": "35-44",
+    "agent_ethnicity": "white"
   }
 }

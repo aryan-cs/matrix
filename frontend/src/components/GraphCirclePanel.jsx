@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Room, RoomEvent, Track } from "livekit-client";
+import callIcon from "../../assets/icons/call.svg";
+import notesIcon from "../../assets/icons/notes.svg";
 
 function clampNodeRadius(count) {
   if (count <= 12) return 18;
@@ -336,7 +338,7 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function GraphCirclePanel({ graph = null }) {
+function GraphCirclePanel({ graph = null, avatarsEnabled = false }) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [terminalText, setTerminalText] = useState("");
   const [spinnerFrameIndex, setSpinnerFrameIndex] = useState(0);
@@ -346,6 +348,7 @@ function GraphCirclePanel({ graph = null }) {
   const [avatarStatus, setAvatarStatus] = useState("Select a node to preview avatar.");
   const [avatarError, setAvatarError] = useState("");
   const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
+  const [activeCall, setActiveCall] = useState(null);
   const selectedNodeIdRef = useRef("");
   const zoomScaleRef = useRef(1);
   const stageRef = useRef(null);
@@ -384,9 +387,13 @@ function GraphCirclePanel({ graph = null }) {
     return mappedAgentsById[selectedNodeId] || null;
   }, [selectedNodeId, mappedAgentsById]);
   const selectedPortraitUrl = useMemo(() => {
-    if (!selectedNodeId) return "";
+    if (!avatarsEnabled || !selectedNodeId) return "";
     return `${PORTRAIT_ENDPOINT}/${encodeURIComponent(selectedNodeId)}`;
-  }, [selectedNodeId]);
+  }, [avatarsEnabled, selectedNodeId]);
+  const selectedDisplayName = useMemo(() => {
+    if (!selectedNodeId) return "This agent";
+    return String(selectedNode?.label || selectedNodeId).trim() || selectedNodeId;
+  }, [selectedNodeId, selectedNode]);
   const avatarContextOverride = useMemo(() => {
     if (!selectedNodeId || !selectedNode) return "";
     const cached = String(summaryCache[selectedNodeId] || "").trim();
@@ -395,6 +402,7 @@ function GraphCirclePanel({ graph = null }) {
     return String(buildFallbackSummary(ctx) || "").trim();
   }, [selectedNodeId, selectedNode, summaryCache, nodeById, adjacencyById]);
   const isSummaryPending = Boolean(selectedNodeId && !summaryCache[selectedNodeId]);
+  const hasActiveCall = Boolean(activeCall && activeCall.nodeId === selectedNodeId);
 
   const clearAudioSink = () => {
     const node = audioSinkRef.current;
@@ -454,7 +462,7 @@ function GraphCirclePanel({ graph = null }) {
     }
     if (playedAny) {
       setNeedsAudioUnlock(false);
-      setAvatarStatus(`Avatar ready for ${selectedNodeId}.`);
+      setAvatarStatus(`${selectedDisplayName} is connected.`);
     }
   };
 
@@ -469,9 +477,24 @@ function GraphCirclePanel({ graph = null }) {
   }, [selectedNodeId, nodeById]);
 
   useEffect(() => {
+    // Switching nodes should not keep the previous call session attached.
+    if (!selectedNodeId) {
+      setActiveCall(null);
+      return;
+    }
+    if (activeCall && activeCall.nodeId !== selectedNodeId) {
+      setActiveCall(null);
+    }
+  }, [selectedNodeId, activeCall]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const loadMappedAgents = async () => {
+      if (!avatarsEnabled) {
+        setMappedAgentsById({});
+        return;
+      }
       try {
         const response = await fetch(AGENTS_ENDPOINT);
         if (!response.ok) return;
@@ -495,12 +518,21 @@ function GraphCirclePanel({ graph = null }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [avatarsEnabled]);
 
   useEffect(() => {
     let cancelled = false;
 
     const startAvatarForSelectedNode = async () => {
+      if (!avatarsEnabled) {
+        disconnectAvatar();
+        setActiveCall(null);
+        setAvatarError("");
+        setNeedsAudioUnlock(false);
+        setAvatarStatus("Simulation not started yet. Start simulation to enable calls.");
+        return;
+      }
+
       if (!selectedNodeId) {
         disconnectAvatar();
         setAvatarError("");
@@ -513,14 +545,22 @@ function GraphCirclePanel({ graph = null }) {
         disconnectAvatar();
         setAvatarError("");
         setNeedsAudioUnlock(false);
-        setAvatarStatus(`No avatar mapping found for ${selectedNodeId}.`);
+        setAvatarStatus(`No avatar mapping found for ${selectedDisplayName}.`);
+        return;
+      }
+
+      if (!activeCall || activeCall.nodeId !== selectedNodeId) {
+        disconnectAvatar();
+        setAvatarError("");
+        setNeedsAudioUnlock(false);
+        setAvatarStatus(`${selectedDisplayName} is ready. Click Call to start voice.`);
         return;
       }
 
       disconnectAvatar();
       setAvatarError("");
       setNeedsAudioUnlock(false);
-      setAvatarStatus(`Starting avatar for ${selectedNodeId}...`);
+      setAvatarStatus(`${selectedDisplayName} is connecting...`);
 
       try {
         const response = await fetch(START_ENDPOINT, {
@@ -528,7 +568,7 @@ function GraphCirclePanel({ graph = null }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             agent_id: selectedNodeId,
-            context_override: avatarContextOverride || undefined,
+            context_override: activeCall.contextOverride || undefined,
           })
         });
         if (!response.ok) {
@@ -546,12 +586,12 @@ function GraphCirclePanel({ graph = null }) {
         });
         room.on(RoomEvent.ConnectionStateChanged, (state) => {
           if (!cancelled) {
-            setAvatarStatus(`Avatar connection: ${state}`);
+            setAvatarStatus(`${selectedDisplayName} is ${state}.`);
           }
         });
         room.on(RoomEvent.Disconnected, () => {
           if (!cancelled) {
-            setAvatarStatus("Avatar disconnected.");
+            setAvatarStatus(`${selectedDisplayName} disconnected.`);
           }
         });
 
@@ -582,12 +622,12 @@ function GraphCirclePanel({ graph = null }) {
         });
 
         roomRef.current = room;
-        setAvatarStatus(`Avatar ready for ${selectedNodeId}.`);
+        setAvatarStatus(`${selectedDisplayName} is connected.`);
       } catch (error) {
         if (cancelled) return;
         disconnectAvatar();
         setAvatarError(error instanceof Error ? error.message : "Could not start avatar.");
-        setAvatarStatus("Avatar failed to start.");
+        setAvatarStatus(`${selectedDisplayName} failed to connect.`);
       }
     };
 
@@ -597,7 +637,7 @@ function GraphCirclePanel({ graph = null }) {
       cancelled = true;
       disconnectAvatar();
     };
-  }, [selectedNodeId, selectedMappedAgent, avatarContextOverride]);
+  }, [avatarsEnabled, selectedNodeId, selectedMappedAgent, activeCall, selectedDisplayName]);
 
   useEffect(() => {
     return () => disconnectAvatar();
@@ -1026,6 +1066,17 @@ function GraphCirclePanel({ graph = null }) {
 
   const resolvedCount = graphData.nodes.length;
   const isTerminalOpen = Boolean(selectedNodeId);
+  const canStartCall = Boolean(avatarsEnabled && selectedNodeId && selectedMappedAgent && !hasActiveCall);
+
+  const handleStartCall = () => {
+    if (!selectedNodeId || !selectedMappedAgent) return;
+    const context = String(avatarContextOverride || "").trim();
+    setActiveCall({
+      nodeId: selectedNodeId,
+      contextOverride: context,
+      nonce: Date.now()
+    });
+  };
 
   return (
     <div className={`graph-circle-canvas ${isTerminalOpen ? "terminal-open" : ""}`}>
@@ -1035,37 +1086,51 @@ function GraphCirclePanel({ graph = null }) {
         ) : null}
         <canvas ref={canvasRef} className="graph-circle-canvas-element" />
       </div>
+      {avatarsEnabled ? (
+        <div className="graph-panel-fab-stack" aria-label="Graph actions">
+          <button
+            type="button"
+            className="graph-panel-fab"
+            aria-label="Call"
+            onClick={handleStartCall}
+            disabled={!canStartCall}
+            title={canStartCall ? "Start call" : "Select a mapped node to call"}
+          >
+            <img src={callIcon} alt="" />
+          </button>
+          <button type="button" className="graph-panel-fab" aria-label="Notes">
+            <img src={notesIcon} alt="" />
+          </button>
+        </div>
+      ) : null}
       <div
         className={`graph-node-terminal ${isTerminalOpen ? "open" : ""}`}
         aria-hidden={!isTerminalOpen}
       >
         <div className="graph-node-terminal-scroll" ref={terminalScrollRef}>
-          <div className="graph-node-avatar">
-            <div className="graph-node-avatar-media">
-              {selectedPortraitUrl ? (
-                <img
-                  key={selectedPortraitUrl}
-                  src={selectedPortraitUrl}
-                  alt={`Portrait of ${selectedNodeId}`}
-                  className="graph-node-portrait-image"
-                  loading="lazy"
-                />
+          {avatarsEnabled ? (
+            <div className="graph-node-avatar">
+              <div className="graph-node-avatar-media">
+                {selectedPortraitUrl ? (
+                  <img
+                    key={selectedPortraitUrl}
+                    src={selectedPortraitUrl}
+                    alt={`Portrait of ${selectedNodeId}`}
+                    className="graph-node-portrait-image"
+                    loading="lazy"
+                  />
+                ) : null}
+              </div>
+              <div ref={audioSinkRef} />
+              <p className="graph-node-avatar-status">{avatarStatus}</p>
+              {needsAudioUnlock ? (
+                <button type="button" className="graph-node-audio-unlock" onClick={unlockAudioPlayback}>
+                  Enable Voice
+                </button>
               ) : null}
+              {avatarError ? <p className="graph-node-avatar-error">{avatarError}</p> : null}
             </div>
-            <div ref={audioSinkRef} />
-            <p className="graph-node-avatar-status">{avatarStatus}</p>
-            {needsAudioUnlock ? (
-              <button type="button" className="graph-node-audio-unlock" onClick={unlockAudioPlayback}>
-                Enable Voice
-              </button>
-            ) : null}
-            {avatarError ? <p className="graph-node-avatar-error">{avatarError}</p> : null}
-            {selectedMappedAgent ? (
-              <p className="graph-node-avatar-meta">
-                {selectedMappedAgent.avatar_name} ({selectedMappedAgent.avatar_id})
-              </p>
-            ) : null}
-          </div>
+          ) : null}
           <pre className="graph-node-terminal-text">
             {isSummaryPending ? (
               <>

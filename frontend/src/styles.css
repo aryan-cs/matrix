@@ -340,6 +340,22 @@ input {
   background: rgba(255, 255, 255, 0.2);
 }
 
+.graph-node-call-button {
+  justify-self: start;
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 6px 11px;
+  cursor: pointer;
+}
+
+.graph-node-call-button:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
 .graph-node-avatar-error {
   margin: 0;
   color: #ff9a9a;
