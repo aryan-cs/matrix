@@ -1774,6 +1774,7 @@ function App() {
   }, [scenarioText]);
 
   const isChatActive = isChatMode;
+  const composerPlaceholder = isChatActive ? "Start typing here..." : placeholderText;
   const clampGraphPanelWidth = (candidateWidth) => {
     const viewportWidth = window.innerWidth || GRAPH_PANEL_MAX_WIDTH + GRAPH_PANEL_MIN_MAIN_WIDTH;
     const maxWidth = Math.max(0, Math.min(GRAPH_PANEL_MAX_WIDTH, viewportWidth - GRAPH_PANEL_MIN_MAIN_WIDTH));
@@ -3330,7 +3331,7 @@ function App() {
           {
             role: "system",
             content:
-              "You are a simulation planner assistant. Decide whether clarifying questions are necessary before generating high-quality representative samples.\n\nRules:\n- Ask follow-up questions ONLY if the request is underspecified for accurate representative generation.\n- Ask no more than 6 follow-up questions.\n- If the user explicitly asks to proceed without more questions (for example: go ahead, continue, as is, use defaults), output exactly: NO_FOLLOWUPS\n- If clarification is NOT needed, output exactly: NO_FOLLOWUPS\n- If clarification IS needed, output ONLY a numbered list of questions (no prose), with between 1 and 6 questions.\n- Keep questions concrete and directly tied to improving representative quality, segmentation, and constraints.\n- Do not include explanations, preambles, or summaries."
+              "You are a simulation planner assistant. Before generation, verify whether TWO required study parameters are present in the user request:\n1) n = number of representatives\n2) simulation_days = number of days to run the simulation\n\nRules:\n- If BOTH parameters are clearly specified, output exactly: NO_FOLLOWUPS\n- If EITHER parameter is missing or ambiguous, output EXACTLY ONE numbered follow-up question (only item '1.')\n- If both are missing, ask for both in that single question\n- If one is present, ask only for the missing one\n- Do NOT ask any other questions in this step\n- Output only NO_FOLLOWUPS or the one numbered question (no extra prose)"
           },
           {
             role: "user",
@@ -3624,7 +3625,7 @@ function App() {
                     scenarioTextRef.current = nextValue;
                     setScenarioText(nextValue);
                   }}
-                  placeholder={placeholderText}
+                  placeholder={composerPlaceholder}
                   aria-label="Simulation scenario"
                 />
                 <button

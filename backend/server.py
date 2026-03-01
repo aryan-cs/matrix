@@ -371,4 +371,8 @@ web_app.mount("/", delegated_api_app)
 def main():
     print("Modal app is ready. Use 'uvicorn server:web_app' to start the local API.")
 
-app = modal_app  # Alias for Modal deployment
+# Export FastAPI app for ASGI hosts (Vercel/Render/etc.)
+app = web_app
+
+# Keep Modal app accessible explicitly when needed (e.g. `modal deploy server.py::modal_application`)
+modal_application = modal_app
