@@ -8,6 +8,8 @@ const DEFAULT_PLANNER_MODEL_ID = "deepseek-r1";
 const DEFAULT_PLANNER_PROXY_PATH = "/api/planner/chat";
 const DEFAULT_EXA_PROXY_PATH = "/api/exa/search";
 const DEFAULT_EXA_API_ENDPOINT = "";
+const DEFAULT_SPEECH_PROXY_PATH = "/api/speech/transcribe";
+const DEFAULT_SPEECH_API_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
 const configFilePath = fileURLToPath(import.meta.url);
 const frontendRootDir = path.dirname(configFilePath);
 const repoRootDir = path.resolve(frontendRootDir, "..");
@@ -62,6 +64,28 @@ function readJsonBody(req) {
         reject(new Error("Invalid JSON body"));
       }
     });
+    req.on("error", reject);
+  });
+}
+
+function readRawBody(req, maxBytes = 30_000_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error("Request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("end", () => {
+      resolve(Buffer.concat(chunks));
+    });
+
     req.on("error", reject);
   });
 }
@@ -358,12 +382,78 @@ function exaProxy(env) {
   };
 }
 
+function speechProxy(env) {
+  const speechApiKey = env.GROQ_API_KEY || env.VITE_GROQ_API_KEY || "";
+  const speechApiEndpoint = env.SPEECH_API_ENDPOINT || DEFAULT_SPEECH_API_ENDPOINT;
+  const speechProxyPath = env.VITE_SPEECH_PROXY_PATH || DEFAULT_SPEECH_PROXY_PATH;
+
+  return {
+    name: "speech-proxy",
+    configureServer(server) {
+      server.middlewares.use(speechProxyPath, async (req, res) => {
+        if (req.method !== "POST") {
+          res.statusCode = 405;
+          res.end("Method Not Allowed");
+          return;
+        }
+
+        if (!speechApiKey) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "GROQ_API_KEY is not configured." }));
+          return;
+        }
+
+        if (!speechApiEndpoint) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "SPEECH_API_ENDPOINT is not configured." }));
+          return;
+        }
+
+        let rawBody;
+        try {
+          rawBody = await readRawBody(req);
+        } catch (error) {
+          res.statusCode = 400;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: error.message }));
+          return;
+        }
+
+        let upstream;
+        try {
+          upstream = await fetch(speechApiEndpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${speechApiKey}`,
+              "Content-Type": req.headers["content-type"] || "multipart/form-data",
+              Accept: "application/json"
+            },
+            body: rawBody
+          });
+        } catch (error) {
+          res.statusCode = 502;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: `Speech request failed: ${error.message}` }));
+          return;
+        }
+
+        const text = await upstream.text();
+        res.statusCode = upstream.status;
+        res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
+        res.end(text);
+      });
+    }
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = mergedEnvForMode(mode);
   return {
     envDir: repoRootDir,
     define: viteClientDefineFromEnv(env),
-    plugins: [react(), plannerLoggingProxy(env), exaProxy(env)],
+    plugins: [react(), plannerLoggingProxy(env), exaProxy(env), speechProxy(env)],
     server: {
       proxy: {
         "/api": {
@@ -374,7 +464,8 @@ export default defineConfig(({ mode }) => {
             const requestUrl = req.url || "";
             if (
               requestUrl.startsWith("/api/planner/chat") ||
-              requestUrl.startsWith("/api/exa/search")
+              requestUrl.startsWith("/api/exa/search") ||
+              requestUrl.startsWith("/api/speech/transcribe")
             ) {
               return requestUrl;
             }
