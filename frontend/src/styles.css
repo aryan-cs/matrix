@@ -159,19 +159,16 @@ input {
   flex-direction: column;
   gap: 10px;
   transform: translateX(calc(100% + 22px));
-  opacity: 0;
   pointer-events: none;
   transition:
     bottom 720ms var(--ease-slingshot),
-    transform 720ms var(--ease-slingshot),
-    opacity 220ms var(--ease-soft);
-  will-change: bottom, transform, opacity;
+    transform 720ms var(--ease-slingshot);
+  will-change: bottom, transform;
 }
 
 .graph-circle-canvas.terminal-open .graph-panel-fab-stack {
   bottom: 212px;
   transform: translateX(0);
-  opacity: 1;
   pointer-events: auto;
 }
 
